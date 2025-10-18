@@ -22,6 +22,25 @@ async function tenantAccessToken(): Promise<string> {
   return j.tenant_access_token as string;
 }
 
+function decryptIfNeeded(body: any) {
+  // If Lark encryption is enabled, the body is { encrypt: "<base64>" }
+  if (!body || !body.encrypt) return body;
+  if (!ENCRYPT_KEY) return body; // no key configured → can't decrypt
+
+  // Per docs: AES-256-CBC, key = SHA256(encrypt_key), IV is the first 16 bytes
+  const buf = Buffer.from(body.encrypt, "base64");
+  const iv = buf.subarray(0, 16);
+  const ciphertext = buf.subarray(16);
+  const key = crypto.createHash("sha256").update(ENCRYPT_KEY, "utf8").digest();
+
+  const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
+  const out = Buffer.concat([
+    decipher.update(ciphertext),
+    decipher.final(),
+  ]).toString("utf8");
+  return JSON.parse(out);
+}
+
 function verifySignature(req: VercelRequest, rawBody: string) {
   if (!ENCRYPT_KEY) return true; // skip if not configured
   const ts = req.headers["x-lark-request-timestamp"] as string;
@@ -73,28 +92,23 @@ function extractTextFromMessageContent(content: string): string {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Get raw body for signature check
   const rawBody =
     typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
-  const body =
-    req.body && typeof req.body === "object"
-      ? req.body
-      : JSON.parse(rawBody || "{}");
+  let body =
+    typeof req.body === "object" ? req.body : JSON.parse(rawBody || "{}");
 
-  // 1) URL verification handshake
+  // 🔐 Decrypt first if needed
+  body = decryptIfNeeded(body);
+
+  // ✅ URL verification must always return the challenge with 200
   if (body?.type === "url_verification" && body?.challenge) {
-    // Optional token verification
-    if (!verifyToken(body)) return res.status(401).json({ msg: "bad token" });
     return res.status(200).json({ challenge: body.challenge });
   }
 
-  // 2) Security: signature or token
+  // (Only after handshake) do token/signature checks
   if (!verifySignature(req, rawBody) || !verifyToken(body)) {
-    // If neither method is configured, both return true; if configured, must pass
-    // Respond 200 to stop retries but do nothing
     return res.status(200).json({ code: 0 });
   }
-
   // 3) Event handling (Message Shortcut or message receive)
   const event = body?.event || {};
   const msg = event?.message || {};
