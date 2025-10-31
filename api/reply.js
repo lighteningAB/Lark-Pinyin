@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       data: {
         receive_id: body.event.sender.sender_id.user_id,
         msg_type: 'text',
-        content: JSON.stringify({ text: pinyinResult })
+        content: JSON.stringify({ "text": pinyinResult })
       }
     });
   }
