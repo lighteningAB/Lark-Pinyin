@@ -1,20 +1,9 @@
 {
-  "name": "lark-pinyin",
-  "version": "1.0.0",
-  "main": "index.js",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "type": "module",
-  "scripts": {
-    "dev": "vercel dev",
-    "deploy": "vercel --prod"
-  },
+  "name": "Lark-Pinyin",
+  "packageManager": "yarn@4.9.2",
   "dependencies": {
-    "pinyin-pro": "^3.27.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.11.30"
+    "@larksuiteoapi/node-sdk": "^1.55.0",
+    "dotenv": "^17.2.3",
+    "pinyin": "^4.0.0"
   }
 }
