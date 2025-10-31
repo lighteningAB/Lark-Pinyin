@@ -65,7 +65,7 @@ export default async function handler(req, res) {
   }
 
   // Handle messages
-  if (body.event?.type === 'im.message.receive_v1') {
+  if (payload.event?.type === 'im.message.receive_v1') {
     const { message: { content, message_type, chat_id, chat_type } } = body.event;
     
     let messageText = '';
