@@ -1,10 +1,8 @@
-import crypto from "node:crypto";
 import { pinyin } from "pinyin-pro";
 
 const APP_ID = process.env.LARK_APP_ID!;
 const APP_SECRET = process.env.LARK_APP_SECRET!;
 const VERIFICATION_TOKEN = process.env.LARK_VERIFICATION_TOKEN; // optional
-const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY; // optional
 const LARK_BASE = process.env.LARK_BASE || "https://open.larksuite.com";
 
 async function tenantAccessToken(): Promise<string> {
@@ -19,40 +17,6 @@ async function tenantAccessToken(): Promise<string> {
     throw new Error(`TAT error: ${r.status} ${JSON.stringify(j)}`);
   }
   return j.tenant_access_token as string;
-}
-
-function decryptIfNeeded(body: any) {
-  // If Lark encryption is enabled, the body is { encrypt: "<base64>" }
-  if (!body || !body.encrypt) return body;
-  if (!ENCRYPT_KEY) return body; // no key configured → can't decrypt
-
-  // Per docs: AES-256-CBC, key = SHA256(encrypt_key), IV is the first 16 bytes
-  const buf = Buffer.from(body.encrypt, "base64");
-  const iv = buf.subarray(0, 16);
-  const ciphertext = buf.subarray(16);
-  const key = crypto.createHash("sha256").update(ENCRYPT_KEY, "utf8").digest();
-
-  const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
-  const out = Buffer.concat([
-    decipher.update(ciphertext),
-    decipher.final(),
-  ]).toString("utf8");
-  return JSON.parse(out);
-}
-
-function verifySignature(req: any, rawBody: string) {
-  if (!ENCRYPT_KEY) return true; // skip if not configured
-  const ts = req.headers["x-lark-request-timestamp"] as string;
-  const nonce = req.headers["x-lark-request-nonce"] as string;
-  const sig = req.headers["x-lark-signature"] as string;
-  const base = `${ts}${nonce}${rawBody}`;
-  const h = crypto.createHmac("sha256", ENCRYPT_KEY).update(base).digest("hex");
-  return h === sig;
-}
-
-function verifyToken(body: any) {
-  if (!VERIFICATION_TOKEN) return true; // skip if not configured
-  return body?.token === VERIFICATION_TOKEN;
 }
 
 function toPinyin(text: string, toneMarks = true) {
@@ -97,53 +61,6 @@ async function sendTextToChat(chatId: string, text: string) {
   }
 }
 
-// Send an interactive card to a chat via IM v1
-async function sendInteractiveToChat(chatId: string, card: any) {
-  const tat = await tenantAccessToken();
-  const r = await fetch(
-    `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tat}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({
-        receive_id: chatId,
-        msg_type: "interactive",
-        content: JSON.stringify(card),
-      }),
-    }
-  );
-  if (!r.ok) {
-    const errText = await r.text();
-    console.error("im.v1 send interactive error", r.status, errText);
-  }
-}
-
-// Reply in thread to a specific message via IM v1
-async function replyTextToMessage(messageId: string, text: string) {
-  const tat = await tenantAccessToken();
-  const r = await fetch(
-    `${LARK_BASE}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tat}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({
-        msg_type: "text",
-        content: JSON.stringify({ text }),
-      }),
-    }
-  );
-  if (!r.ok) {
-    const errText = await r.text();
-    console.error("im.v1 reply text error", r.status, errText);
-  }
-}
-
 function extractTextFromMessageContent(content: string): string {
   // Lark message "content" is a JSON string; extract text conservatively
   try {
@@ -162,48 +79,35 @@ function extractTextFromMessageContent(content: string): string {
 }
 
 export default async function handler(req: any, res: any) {
-  const rawBody =
-    typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
-  let body =
-    typeof req.body === "object" ? req.body : JSON.parse(rawBody || "{}");
+  const body = typeof req.body === "object" ? req.body : JSON.parse(req.body || "{}");
 
-  // 🔐 Decrypt first if needed
-  body = decryptIfNeeded(body);
-
-  // ✅ URL verification must always return the challenge with 200
+  // URL verification handshake
   if (body?.type === "url_verification" && body?.challenge) {
     return res.status(200).json({ challenge: body.challenge });
   }
 
-  // (Only after handshake) do token/signature checks
-  if (!verifySignature(req, rawBody) || !verifyToken(body)) {
+  // Optional verification token check (simple and explicit)
+  if (VERIFICATION_TOKEN && body?.token && body.token !== VERIFICATION_TOKEN) {
     return res.status(200).json({ code: 0 });
   }
-  // 3) Event handling (Message Shortcut or message receive)
+
+  // Handle message receive (IM v1 event)
   const event = body?.event || {};
+  // Support both newer and older shapes just in case
   const msg = event?.message || {};
   const chatId = msg.chat_id || msg.conversation_id;
   const content = msg.content || "";
-  const chatType = msg.chat_type || event?.chat_type;
   const text = extractTextFromMessageContent(content);
 
-  // Convert to Pinyin (tone marks by default; switch to numbers if you prefer)
-  const py = toPinyin(text, /* toneMarks */ true);
-  const card = buildCard(text, py);
-
-  try {
-    if (chatType === "p2p") {
-      // Direct message with the bot → reply with plain text Pinyin
-      await sendTextToChat(chatId, py || "");
-    } else {
-      // Fallback for non-p2p chats → keep interactive card behavior
-      await sendInteractiveToChat(chatId, card);
-    }
-  } catch (e) {
-    console.error("handler error", (e as Error).message);
+  if (!chatId || !text) {
+    return res.status(200).json({ code: 0 });
   }
 
-  // Always return OK so Lark doesn’t retry
+  const py = toPinyin(text, true);
+  try {
+    await sendTextToChat(chatId, py || "");
+  } catch (_) {}
+
   return res.status(200).json({ code: 0 });
 }
 
