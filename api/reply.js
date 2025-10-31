@@ -27,7 +27,7 @@ const client = new Lark.Client({
 
 export default async function handler(req, res) {
 
-  const VERIFY_TOKEN = process.env.ERIFICATION_TOKEN || "";
+  const VERIFY_TOKEN = process.env.VERIFICATION_TOKEN || "";
   const ENCRYPT_KEY = process.env.ENCRYPT_KEY || "";
 
   // Build payload (decrypt if needed)
