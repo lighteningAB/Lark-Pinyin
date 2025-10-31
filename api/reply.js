@@ -25,54 +25,18 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // verify signature headers (support both header name variants)
-const timestamp = req.headers['x-lark-request-timestamp'] || req.headers['x-lark-timestamp'];
-const nonce = req.headers['x-lark-request-nonce'] || req.headers['x-lark-nonce'];
-const signature = req.headers['x-lark-signature'] || req.headers['x-lark-sign'];
+  if (payload.type === "url_verification") {
+    const VERIFY_TOKEN = process.env.LARK_VERIFICATION_TOKEN;
 
-// get raw body string (use req.rawBody if available, otherwise stringify)
-const rawBodyStr = typeof req.rawBody === 'string' ? req.rawBody : JSON.stringify(req.body);
-
-// verify incoming signature
-const calc = calculateSignature(timestamp || '', nonce || '', process.env.ENCRYPT_KEY || '', rawBodyStr || '');
-if (signature && signature !== calc) {
-  console.error('Invalid signature', { signature, calc });
-  return res.status(401).json({ error: 'Invalid signature' });
-}
-
-let body = req.body;
-
-// handle encrypted payloads: decrypt then replace body
-if (body.encrypt) {
-  try {
-    // try SDK decrypt first (if available)
-    if (Lark.Util && typeof Lark.Util.decrypt === 'function') {
-      const decrypted = Lark.Util.decrypt(body.encrypt, process.env.ENCRYPT_KEY);
-      body = JSON.parse(decrypted);
-    } else {
-      // fallback manual AES-256-CBC decryption (ENCRYPT_KEY is base64)
-      const crypto = require('crypto');
-      const key = Buffer.from(process.env.ENCRYPT_KEY, 'base64');
-      const encrypted = Buffer.from(body.encrypt, 'base64');
-      const iv = encrypted.slice(0, 16);
-      const data = encrypted.slice(16);
-      const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-      let decrypted = decipher.update(data, undefined, 'utf8');
-      decrypted += decipher.final('utf8');
-      body = JSON.parse(decrypted);
+    // Optional security check — verify the request token matches your app’s token
+    if (VERIFY_TOKEN && payload.token !== VERIFY_TOKEN) {
+      console.warn("Lark verification token mismatch");
+      return res.status(401).send("invalid token");
     }
-    console.log('Decrypted body:', body);
-  } catch (err) {
-    console.error('Decryption error:', err);
-    return res.status(400).json({ error: 'Decryption failed' });
-  }
-}
 
-// URL verification: return only the challenge JSON immediately
-if (body.type === 'url_verification') {
-  console.log('url_verification, returning challenge');
-  return res.status(200).json({ challenge: body.challenge });
-}
+    // Respond with the challenge value exactly as given
+    return res.json({ challenge: payload.challenge });
+  }
 
   // Handle messages
   if (body.event?.type === 'im.message.receive_v1') {
