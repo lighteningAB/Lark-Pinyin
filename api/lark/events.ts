@@ -73,6 +73,7 @@ function buildCard(orig: string, py: string) {
   };
 }
 
+// Per IM v1 send message API: POST /open-apis/im/v1/messages?receive_id_type=chat_id
 async function sendTextToChat(chatId: string, text: string) {
   const tat = await tenantAccessToken();
   const r = await fetch(
@@ -91,8 +92,55 @@ async function sendTextToChat(chatId: string, text: string) {
     }
   );
   if (!r.ok) {
-    const err = await r.text();
-    console.error("send text error", r.status, err);
+    const errText = await r.text();
+    console.error("im.v1 send text error", r.status, errText);
+  }
+}
+
+// Send an interactive card to a chat via IM v1
+async function sendInteractiveToChat(chatId: string, card: any) {
+  const tat = await tenantAccessToken();
+  const r = await fetch(
+    `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tat}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      }),
+    }
+  );
+  if (!r.ok) {
+    const errText = await r.text();
+    console.error("im.v1 send interactive error", r.status, errText);
+  }
+}
+
+// Reply in thread to a specific message via IM v1
+async function replyTextToMessage(messageId: string, text: string) {
+  const tat = await tenantAccessToken();
+  const r = await fetch(
+    `${LARK_BASE}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tat}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      }),
+    }
+  );
+  if (!r.ok) {
+    const errText = await r.text();
+    console.error("im.v1 reply text error", r.status, errText);
   }
 }
 
@@ -149,26 +197,7 @@ export default async function handler(req: any, res: any) {
       await sendTextToChat(chatId, py || "");
     } else {
       // Fallback for non-p2p chats → keep interactive card behavior
-      const tat = await tenantAccessToken();
-      const r = await fetch(
-        `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${tat}`,
-            "Content-Type": "application/json; charset=utf-8",
-          },
-          body: JSON.stringify({
-            receive_id: chatId,
-            msg_type: "interactive",
-            content: JSON.stringify(card),
-          }),
-        }
-      );
-      if (!r.ok) {
-        const err = await r.text();
-        console.error("send message error", r.status, err);
-      }
+      await sendInteractiveToChat(chatId, card);
     }
   } catch (e) {
     console.error("handler error", (e as Error).message);
