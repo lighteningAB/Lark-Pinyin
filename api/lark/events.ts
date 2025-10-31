@@ -73,10 +73,10 @@ function buildCard(orig: string, py: string) {
   };
 }
 
-async function sendTextToChat(receiveId: string, receiveIdType: "chat_id" | "open_chat_id", text: string) {
+async function sendTextToChat(chatId: string, text: string) {
   const tat = await tenantAccessToken();
   const r = await fetch(
-    `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`,
+    `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
     {
       method: "POST",
       headers: {
@@ -84,7 +84,7 @@ async function sendTextToChat(receiveId: string, receiveIdType: "chat_id" | "ope
         "Content-Type": "application/json; charset=utf-8",
       },
       body: JSON.stringify({
-        receive_id: receiveId,
+        receive_id: chatId,
         msg_type: "text",
         content: JSON.stringify({ text }),
       }),
@@ -134,8 +134,7 @@ export default async function handler(req: any, res: any) {
   // 3) Event handling (Message Shortcut or message receive)
   const event = body?.event || {};
   const msg = event?.message || {};
-  const chatId = msg.chat_id || event?.chat_id;
-  const openChatId = msg.open_chat_id || event?.open_chat_id;
+  const chatId = msg.chat_id || msg.conversation_id;
   const content = msg.content || "";
   const chatType = msg.chat_type || event?.chat_type;
   const text = extractTextFromMessageContent(content);
@@ -147,20 +146,12 @@ export default async function handler(req: any, res: any) {
   try {
     if (chatType === "p2p") {
       // Direct message with the bot → reply with plain text Pinyin
-      const receiveId = openChatId || chatId;
-      const receiveIdType = openChatId ? "open_chat_id" : "chat_id";
-      if (!receiveId) {
-        console.error("missing receive id for p2p reply");
-      } else {
-        await sendTextToChat(receiveId, receiveIdType, py || "");
-      }
+      await sendTextToChat(chatId, py || "");
     } else {
       // Fallback for non-p2p chats → keep interactive card behavior
       const tat = await tenantAccessToken();
-      const receiveId = openChatId || chatId;
-      const receiveIdType = openChatId ? "open_chat_id" : "chat_id";
       const r = await fetch(
-        `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`,
+        `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
         {
           method: "POST",
           headers: {
@@ -168,7 +159,7 @@ export default async function handler(req: any, res: any) {
             "Content-Type": "application/json; charset=utf-8",
           },
           body: JSON.stringify({
-            receive_id: receiveId,
+            receive_id: chatId,
             msg_type: "interactive",
             content: JSON.stringify(card),
           }),
