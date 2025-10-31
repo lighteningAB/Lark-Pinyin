@@ -74,6 +74,29 @@ function buildCard(orig: string, py: string) {
   };
 }
 
+async function sendTextToChat(chatId: string, text: string) {
+  const tat = await tenantAccessToken();
+  const r = await fetch(
+    `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tat}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      }),
+    }
+  );
+  if (!r.ok) {
+    const err = await r.text();
+    console.error("send text error", r.status, err);
+  }
+}
+
 function extractTextFromMessageContent(content: string): string {
   // Lark message "content" is a JSON string; extract text conservatively
   try {
@@ -114,6 +137,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const msg = event?.message || {};
   const chatId = msg.chat_id || msg.conversation_id;
   const content = msg.content || "";
+  const chatType = msg.chat_type || event?.chat_type;
   const text = extractTextFromMessageContent(content);
 
   // Convert to Pinyin (tone marks by default; switch to numbers if you prefer)
@@ -121,25 +145,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const card = buildCard(text, py);
 
   try {
-    const tat = await tenantAccessToken();
-    const r = await fetch(
-      `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${tat}`,
-          "Content-Type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify({
-          receive_id: chatId,
-          msg_type: "interactive",
-          content: JSON.stringify(card),
-        }),
+    if (chatType === "p2p") {
+      // Direct message with the bot → reply with plain text Pinyin
+      await sendTextToChat(chatId, py || "");
+    } else {
+      // Fallback for non-p2p chats → keep interactive card behavior
+      const tat = await tenantAccessToken();
+      const r = await fetch(
+        `${LARK_BASE}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tat}`,
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify({
+            receive_id: chatId,
+            msg_type: "interactive",
+            content: JSON.stringify(card),
+          }),
+        }
+      );
+      if (!r.ok) {
+        const err = await r.text();
+        console.error("send message error", r.status, err);
       }
-    );
-    if (!r.ok) {
-      const err = await r.text();
-      console.error("send message error", r.status, err);
     }
   } catch (e) {
     console.error("handler error", (e as Error).message);
