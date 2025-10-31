@@ -20,11 +20,26 @@ export default async function handler(req, res) {
 
   const body = req.body;
   
+  if (body.encrypt) {
+    try {
+      // The SDK will automatically decrypt the request using the encryptKey
+      const eventDispatcher = new Lark.EventDispatcher({
+        encryptKey: process.env.ENCRYPT_KEY
+      });
+      body = await eventDispatcher.decrypt(body.encrypt);
+      console.log('Decrypted body:', body);
+    } catch (error) {
+      console.error('Decryption error:', error);
+      return res.status(400).json({ error: 'Decryption failed' });
+    }
+  }
+
   // Handle URL verification
-   if (body.type === 'url_verification') {
-    console.log('Handling URL verification:', body);
+  if (body.type === 'url_verification') {
+    console.log('Verification request received:', body);
     if (body.token !== process.env.VERIFICATION_TOKEN) {
-      return res.status(401).json({ error: 'Invalid verification token' });
+      console.error('Invalid verification token');
+      return res.status(401).json({ error: 'Invalid token' });
     }
     return res.status(200).json({ challenge: body.challenge });
   }
