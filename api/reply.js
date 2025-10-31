@@ -8,7 +8,9 @@ const client = new Lark.Client({
   appId: process.env.APP_ID,
   appSecret: process.env.APP_SECRET,
   appType: 'custom',
-  domain: process.env.BASE_DOMAIN || 'https://open.larksuite.com'
+  domain: process.env.BASE_DOMAIN || 'https://open.larksuite.com',
+  verificationToken: process.env.VERIFICATION_TOKEN,
+  encryptKey: process.env.ENCRYPT_KEY,
 });
 
 export default async function handler(req, res) {
@@ -19,8 +21,12 @@ export default async function handler(req, res) {
   const body = req.body;
   
   // Handle URL verification
-  if (body.type === 'url_verification') {
-    return res.json({ challenge: body.challenge });
+   if (body.type === 'url_verification') {
+    console.log('Handling URL verification:', body);
+    if (body.token !== process.env.VERIFICATION_TOKEN) {
+      return res.status(401).json({ error: 'Invalid verification token' });
+    }
+    return res.status(200).json({ challenge: body.challenge });
   }
 
   // Handle messages
