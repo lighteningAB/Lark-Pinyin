@@ -1,16 +1,14 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import pinyin from 'pinyin';
-import env from 'dotenv';
+import dotenv from 'dotenv';
 
-appid = process.env.APP_ID;
-appsecret = process.env.APP_SECRET;
-basedomain = process.env.BASE_DOMAIN;
+dotenv.config();
 
-const client = new Client({
+const client = new Lark.Client({
   appId: process.env.APP_ID,
   appSecret: process.env.APP_SECRET,
   appType: 'custom',
-  domain: process.env.BASE_DOMAIN || 'https://open.feishu.cn'
+  domain: process.env.BASE_DOMAIN || 'https://open.larksuite.com'
 });
 
 export default async function handler(req, res) {
@@ -26,22 +24,45 @@ export default async function handler(req, res) {
   }
 
   // Handle messages
-  if (body.event.type === 'message') {
-    const { text } = body.event.message;
+  if (body.event?.type === 'im.message.receive_v1') {
+    const { message: { content, message_type, chat_id, chat_type } } = body.event;
     
-    // Convert Chinese text to pinyin
-    const pinyinResult = pinyin(text, {
-      style: pinyin.STYLE_NORMAL
-    }).flat().join(' ');
+    let messageText = '';
+    try {
+      if (message_type === 'text') {
+        messageText = JSON.parse(content).text;
+        // Convert Chinese text to pinyin
+        const pinyinResult = pinyin(messageText, {
+          style: pinyin.STYLE_NORMAL
+        }).flat().join(' ');
 
-    // Send reply
-    await client.im.message.create({
-      data: {
-        receive_id: body.event.sender.sender_id.user_id,
-        msg_type: 'text',
-        content: JSON.stringify({ "text": pinyinResult })
+        if (chat_type === 'p2p') {
+          await client.im.message.create({
+            params: {
+              receive_id_type: 'chat_id',
+            },
+            data: {
+              receive_id: chat_id,
+              content: JSON.stringify({ text: pinyinResult }),
+              msg_type: 'text'
+            }
+          });
+        } else {
+          await client.im.message.reply({
+            path: {
+              message_id: body.event.message.message_id,
+            },
+            data: {
+              content: JSON.stringify({ text: pinyinResult }),
+              msg_type: 'text'
+            }
+          });
+        }
       }
-    });
+    } catch (error) {
+      console.error('Error processing message:', error);
+      return res.status(500).json({ error: 'Failed to process message' });
+    }
   }
 
   return res.status(200).json({ ok: true });
