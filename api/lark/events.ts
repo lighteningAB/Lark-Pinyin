@@ -1,5 +1,4 @@
-import crypto from "crypto";
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+import crypto from "node:crypto";
 import { pinyin } from "pinyin-pro";
 
 const APP_ID = process.env.LARK_APP_ID!;
@@ -41,7 +40,7 @@ function decryptIfNeeded(body: any) {
   return JSON.parse(out);
 }
 
-function verifySignature(req: VercelRequest, rawBody: string) {
+function verifySignature(req: any, rawBody: string) {
   if (!ENCRYPT_KEY) return true; // skip if not configured
   const ts = req.headers["x-lark-request-timestamp"] as string;
   const nonce = req.headers["x-lark-request-nonce"] as string;
@@ -58,7 +57,7 @@ function verifyToken(body: any) {
 
 function toPinyin(text: string, toneMarks = true) {
   // pinyin-pro keeps non-Hanzi as-is; spaces between syllables
-  return pinyin(text, { toneType: toneMarks ? "mark" : "num" })
+  return pinyin(text, { toneType: toneMarks ? "symbol" : "num" })
     .replace(/\s{2,}/g, " ")
     .trim();
 }
@@ -114,7 +113,7 @@ function extractTextFromMessageContent(content: string): string {
   return "";
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   const rawBody =
     typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
   let body =
