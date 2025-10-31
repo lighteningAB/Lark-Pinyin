@@ -2,7 +2,7 @@ import { pinyin } from "pinyin-pro";
 
 const APP_ID = process.env.LARK_APP_ID!;
 const APP_SECRET = process.env.LARK_APP_SECRET!;
-const VERIFICATION_TOKEN = process.env.LARK_VERIFICATION_TOKEN; // optional
+const VERIFICATION_TOKEN = process.env.VERIFICATION_TOKEN; // optional
 const LARK_BASE = process.env.LARK_BASE || "https://open.larksuite.com";
 
 async function tenantAccessToken(): Promise<string> {
