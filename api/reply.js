@@ -2,9 +2,10 @@
 import crypto from 'crypto';
 import { Client } from '@larksuiteoapi/node-sdk';
 
-// ---- Vercel: we need the raw request body for signature verification ----
+// -- Vercel: keep raw body for signature verification
 export const config = { api: { bodyParser: false } };
 
+// Map base domain to SDK domain
 function normalizeBaseDomain(input) {
   if (!input) return undefined;
   const val = String(input).trim().toLowerCase();
@@ -19,22 +20,22 @@ function normalizeBaseDomain(input) {
 }
 
 const resolvedDomain = normalizeBaseDomain(process.env.BASE_DOMAIN);
-
 const client = new Client({
   appId: process.env.APP_ID,
   appSecret: process.env.APP_SECRET,
   domain: resolvedDomain, // 'feishu' (CN) or 'larksuite' (Global)
 });
 
+// Basic env validation
 if (!process.env.APP_ID || !process.env.APP_SECRET) console.error('[config] Missing APP_ID or APP_SECRET');
 if (!process.env.BASE_DOMAIN) {
-  console.warn('[config] BASE_DOMAIN not set. Expected "larksuite" or "feishu" (or a known open domain URL).');
+  console.warn('[config] BASE_DOMAIN not set. Expected "larksuite" or "feishu" (or known open domain URL).');
 } else {
   console.info('[config] BASE_DOMAIN =', process.env.BASE_DOMAIN);
 }
 console.info('[config] Resolved SDK domain =', resolvedDomain || '(default)');
 
-/** Read raw body as string (required for signature verification) */
+// Read raw request body
 async function readRawBody(req) {
   return await new Promise((resolve, reject) => {
     const chunks = [];
@@ -44,53 +45,77 @@ async function readRawBody(req) {
   });
 }
 
-/** v2 Signature verification (HMAC-SHA256, base64 or hex) */
+/** Verify v2 signature.
+ * Prefers encrypted variant: HMAC-SHA256(timestamp + nonce + encrypt)
+ * Fallback plaintext:        HMAC-SHA256(timestamp + nonce + rawBody)
+ * Accepts base64 or hex header; strips "sha256=" / "v2=" prefixes.
+ */
 function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
   if (!timestamp || !nonce || !signature || !appSecret) return false;
 
-  // Normalize header like "sha256=..." or "v1=..."
-  let providedSig = String(signature).trim();
-  const eqIdx = providedSig.indexOf('=');
-  if (eqIdx > 0 && /^[a-z0-9]+$/i.test(providedSig.slice(0, eqIdx))) {
-    providedSig = providedSig.slice(eqIdx + 1).trim();
-  }
+  // Normalize header (possibly "sha256=..." or "v2=...")
+  let provided = String(signature).trim();
+  const eq = provided.indexOf('=');
+  if (eq > 0 && /^[a-z0-9]+$/i.test(provided.slice(0, eq))) provided = provided.slice(eq + 1).trim();
 
-  // Detect encrypted payloads ("encrypt" field)
-  let parsedEncrypt;
+  // Extract encrypt field (without decoding!)
+  let encryptField;
   try {
-    const parsedMaybe = JSON.parse(body);
-    if (parsedMaybe && typeof parsedMaybe.encrypt === 'string') parsedEncrypt = parsedMaybe.encrypt;
+    const maybe = JSON.parse(body);
+    if (maybe && typeof maybe.encrypt === 'string') encryptField = maybe.encrypt;
   } catch {}
 
-  // Per docs: 
-  // - plaintext: HMAC-SHA256(timestamp + nonce + rawBody)
-  // - encrypted: HMAC-SHA256(timestamp + nonce + encrypt)
-  const base = `${timestamp}${nonce}${parsedEncrypt ? parsedEncrypt : body}`;
-  const hmac = crypto.createHmac('sha256', appSecret).update(base).digest();
+  const candidates = [];
 
-  // Accept either lowercase hex or base64 signatures
-  if (/^[0-9a-f]{64}$/i.test(providedSig)) {
-    const calcHex = hmac.toString('hex');
-    const sigHexLower = providedSig.toLowerCase();
-    const calcBuf = Buffer.from(calcHex, 'utf8');
-    const sigBuf = Buffer.from(sigHexLower, 'utf8');
-    return calcBuf.length === sigBuf.length && crypto.timingSafeEqual(calcBuf, sigBuf);
+  // Variant B: timestamp + nonce + encrypt
+  if (encryptField) {
+    const baseB = `${timestamp}${nonce}${encryptField}`;
+    const hB = crypto.createHmac('sha256', appSecret).update(baseB).digest();
+    candidates.push({ bin: hB, hex: hB.toString('hex') });
   }
 
+  // Variant A: timestamp + nonce + rawBody
+  const baseA = `${timestamp}${nonce}${body}`;
+  const hA = crypto.createHmac('sha256', appSecret).update(baseA).digest();
+  candidates.push({ bin: hA, hex: hA.toString('hex') });
+
+  if (process.env.DEBUG_SIGNING === '1') {
+    try {
+      console.info('[auth][debug] header (start)=', String(signature).slice(0, 16));
+      if (encryptField) {
+        console.info('[auth][debug] calcB b64=', candidates[0].bin.toString('base64').slice(0, 16),
+                     ' hex=', candidates[0].hex.slice(0, 16), ' (encrypt variant)');
+      }
+      console.info('[auth][debug] calcA b64=', hA.toString('base64').slice(0, 16),
+                   ' hex=', hA.toString('hex').slice(0, 16), ' (rawBody variant)');
+    } catch {}
+  }
+
+  // If header looks like 64-hex, compare as hex
+  if (/^[0-9a-f]{64}$/i.test(provided)) {
+    const sigHex = provided.toLowerCase();
+    return candidates.some(({ hex }) => {
+      const a = Buffer.from(hex, 'utf8');
+      const b = Buffer.from(sigHex, 'utf8');
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    });
+  }
+
+  // Otherwise treat as base64
   try {
-    const headerBytes = Buffer.from(providedSig, 'base64');
-    return headerBytes.length === hmac.length && crypto.timingSafeEqual(headerBytes, hmac);
+    const sig = Buffer.from(provided, 'base64');
+    return candidates.some(({ bin }) => sig.length === bin.length && crypto.timingSafeEqual(sig, bin));
   } catch {
     return false;
   }
 }
 
-/** Decrypt Feishu/Lark Event (if "encrypt" present) using AES-256-CBC, PKCS#7.
- * Key = SHA256(ENCRYPT_KEY). Ciphertext = base64( IV(16) || CIPHERTEXT ).
+/** Decrypt if "encrypt" is present.
+ * AES-256-CBC, PKCS#7; key = SHA256(ENCRYPT_KEY); payload = base64( IV(16) || CIPHERTEXT )
  */
 function decryptIfNeeded(rawBodyString) {
   const parsed = JSON.parse(rawBodyString);
-  if (!parsed.encrypt) return parsed; // plaintext event
+  if (!parsed.encrypt) return parsed;
 
   const key = process.env.ENCRYPT_KEY;
   if (!key) throw new Error('ENCRYPT_KEY missing but payload is encrypted.');
@@ -115,7 +140,7 @@ export default async function handler(req, res) {
 
   const rawBody = await readRawBody(req);
 
-  // Feishu/Lark headers
+  // Feishu/Lark headers (Global "x-lark-*" or CN "x-feishu-*")
   const hSig = req.headers['x-lark-signature'] || req.headers['x-feishu-signature'];
   const hTs  = req.headers['x-lark-request-timestamp'] || req.headers['x-feishu-request-timestamp'];
   const hN   = req.headers['x-lark-request-nonce'] || req.headers['x-feishu-request-nonce'];
@@ -131,7 +156,7 @@ export default async function handler(req, res) {
     } catch {}
   }
 
-  // Verify signature (if header present)
+  // Verify signature when header provided
   if (hSig) {
     const ok = verifyV2Signature({
       timestamp: String(hTs || ''),
@@ -146,7 +171,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // Parse & decrypt
+  // Parse (and decrypt if needed) AFTER signature verification
   let body;
   try {
     body = decryptIfNeeded(rawBody);
@@ -172,12 +197,12 @@ export default async function handler(req, res) {
     } catch {}
   }
 
-  // URL verification
+  // URL verification handshake
   if (body.type === 'url_verification') {
     return res.status(200).json({ challenge: body.challenge });
   }
 
-  // Optional legacy token check
+  // Optional legacy verification token check
   const expectedToken = process.env.VERIFICATION_TOKEN;
   if (expectedToken) {
     const tokenInBody = body?.header?.token || body?.token;
@@ -187,7 +212,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // Events
+  // Handle events
   const event = body.event;
   if (event?.type === 'im.message.receive_v1') {
     const { chat_id, content, message_type, chat_type, message_id } = event.message;
@@ -203,6 +228,7 @@ export default async function handler(req, res) {
 
     try {
       if (chat_type === 'p2p') {
+        // p2p: use chat_id + receive_id_type=chat_id
         await client.im.v1.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
@@ -212,6 +238,7 @@ export default async function handler(req, res) {
           },
         });
       } else {
+        // group/thread: reply to message_id
         await client.im.v1.message.reply({
           path: { message_id },
           data: {
@@ -224,11 +251,10 @@ export default async function handler(req, res) {
       console.error('[lark api] send message failed', {
         name: err?.name, message: err?.message, code: err?.code, status: err?.status, data: err?.response?.data,
       });
-      // Still ACK below
+      // still ACK
     }
   }
 
-  // Always ACK to avoid retries
+  // ACK quickly to avoid retries
   return res.status(200).json({ ok: true });
 }
-
