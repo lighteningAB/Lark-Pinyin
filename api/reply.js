@@ -3,16 +3,12 @@ import crypto from 'crypto';
 import { Client } from '@larksuiteoapi/node-sdk';
 
 // ---- Vercel: we need the raw request body for signature verification ----
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 function normalizeBaseDomain(input) {
   if (!input) return undefined;
   const val = String(input).trim().toLowerCase();
-  // Accept shorthand identifiers used by SDK
   if (val === 'larksuite' || val === 'lark' || val === 'feishu') return val === 'lark' ? 'larksuite' : val;
-  // Accept full URLs and map hostnames
   try {
     const url = new URL(val.startsWith('http') ? val : `https://${val}`);
     const host = url.hostname;
@@ -30,10 +26,7 @@ const client = new Client({
   domain: resolvedDomain, // 'feishu' (CN) or 'larksuite' (Global)
 });
 
-// Basic env validation to surface common 401 causes
-if (!process.env.APP_ID || !process.env.APP_SECRET) {
-  console.error('[config] Missing APP_ID or APP_SECRET');
-}
+if (!process.env.APP_ID || !process.env.APP_SECRET) console.error('[config] Missing APP_ID or APP_SECRET');
 if (!process.env.BASE_DOMAIN) {
   console.warn('[config] BASE_DOMAIN not set. Expected "larksuite" or "feishu" (or a known open domain URL).');
 } else {
@@ -44,114 +37,76 @@ console.info('[config] Resolved SDK domain =', resolvedDomain || '(default)');
 /** Read raw body as string (required for signature verification) */
 async function readRawBody(req) {
   return await new Promise((resolve, reject) => {
-    let data = [];
-    req.on('data', (chunk) => data.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(data).toString('utf8')));
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
 }
 
-/** v2 Signature verification (HMAC-SHA256, base64) */
+/** v2 Signature verification (HMAC-SHA256, base64 or hex) */
 function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
-  // Per docs: signature v2 uses HMAC-SHA256 over (timestamp + nonce + rawBody), output base64
   if (!timestamp || !nonce || !signature || !appSecret) return false;
 
-  // Normalize header like "sha256=..." or "v1=..." if present
+  // Normalize header like "sha256=..." or "v1=..."
   let providedSig = String(signature).trim();
   const eqIdx = providedSig.indexOf('=');
   if (eqIdx > 0 && /^[a-z0-9]+$/i.test(providedSig.slice(0, eqIdx))) {
     providedSig = providedSig.slice(eqIdx + 1).trim();
   }
 
-  // Attempt to parse encrypt to detect encrypted payloads
-  let parsedEncrypt = undefined;
+  // Detect encrypted payloads ("encrypt" field)
+  let parsedEncrypt;
   try {
     const parsedMaybe = JSON.parse(body);
     if (parsedMaybe && typeof parsedMaybe.encrypt === 'string') parsedEncrypt = parsedMaybe.encrypt;
   } catch {}
 
-  // If encrypted: Variant B ONLY (timestamp + nonce + encrypt). Else: Variant A ONLY (timestamp + nonce + rawBody)
-  let baseStringA = null;
-  let hmacA = null;
-  let hmacAHex = null;
-  let hmacAB64 = null;
+  // Per docs: 
+  // - plaintext: HMAC-SHA256(timestamp + nonce + rawBody)
+  // - encrypted: HMAC-SHA256(timestamp + nonce + encrypt)
+  const base = `${timestamp}${nonce}${parsedEncrypt ? parsedEncrypt : body}`;
+  const hmac = crypto.createHmac('sha256', appSecret).update(base).digest();
 
-  let baseStringB = null;
-  let hmacB = null;
-  let hmacBHex = null;
-  let hmacBB64 = null;
-
-  if (parsedEncrypt) {
-    baseStringB = `${timestamp}${nonce}${parsedEncrypt}`;
-    hmacB = crypto.createHmac('sha256', appSecret).update(baseStringB).digest();
-    hmacBHex = hmacB.toString('hex');
-    hmacBB64 = hmacB.toString('base64');
-  } else {
-    baseStringA = `${timestamp}${nonce}${body}`;
-    hmacA = crypto.createHmac('sha256', appSecret).update(baseStringA).digest();
-    hmacAHex = hmacA.toString('hex');
-    hmacAB64 = hmacA.toString('base64');
-  }
-
-  if (process.env.DEBUG_SIGNING === '1') {
-    try {
-      console.info('[auth][debug] signing details', {
-        header: String(signature).slice(0, 128),
-        calcB64_A: hmacAB64 ? hmacAB64.slice(0, 128) : undefined,
-        calcHex_A: hmacAHex ? hmacAHex.slice(0, 128) : undefined,
-        calcB64_B: hmacBB64 ? hmacBB64.slice(0, 128) : undefined,
-        calcHex_B: hmacBHex ? hmacBHex.slice(0, 128) : undefined,
-        baseStringAHead: baseStringA ? baseStringA.slice(0, 128) : undefined,
-        baseStringATail: baseStringA ? baseStringA.slice(-128) : undefined,
-        baseStringALength: baseStringA ? baseStringA.length : undefined,
-      });
-    } catch {}
-  }
-
-  // Prefer hex (per CN docs where header may be lowercase hex)
+  // Accept either lowercase hex or base64 signatures
   if (/^[0-9a-f]{64}$/i.test(providedSig)) {
+    const calcHex = hmac.toString('hex');
     const sigHexLower = providedSig.toLowerCase();
-    // Compare hex strings in constant time by comparing bytes of strings
-    const tryHex = parsedEncrypt ? [hmacBHex] : [hmacAHex];
-    for (const calcHex of tryHex) {
-      const calcBuf = Buffer.from(calcHex, 'utf8');
-      const sigBuf = Buffer.from(sigHexLower, 'utf8');
-      if (calcBuf.length === sigBuf.length && crypto.timingSafeEqual(calcBuf, sigBuf)) return true;
-    }
-    return false;
+    const calcBuf = Buffer.from(calcHex, 'utf8');
+    const sigBuf = Buffer.from(sigHexLower, 'utf8');
+    return calcBuf.length === sigBuf.length && crypto.timingSafeEqual(calcBuf, sigBuf);
   }
 
-  // Otherwise, attempt base64
   try {
     const headerBytes = Buffer.from(providedSig, 'base64');
-    const tryB64 = parsedEncrypt ? [hmacB] : [hmacA];
-    for (const calc of tryB64) {
-      if (headerBytes.length === calc.length && crypto.timingSafeEqual(calc, headerBytes)) return true;
-    }
-  } catch {}
-
-  return false;
+    return headerBytes.length === hmac.length && crypto.timingSafeEqual(headerBytes, hmac);
+  } catch {
+    return false;
+  }
 }
 
-/** Optional decryption if you enabled "Encrypt Key" */
+/** Decrypt Feishu/Lark Event (if "encrypt" present) using AES-256-CBC, PKCS#7.
+ * Key = SHA256(ENCRYPT_KEY). Ciphertext = base64( IV(16) || CIPHERTEXT ).
+ */
 function decryptIfNeeded(rawBodyString) {
   const parsed = JSON.parse(rawBodyString);
-  if (!parsed.encrypt) return parsed; // not encrypted
+  if (!parsed.encrypt) return parsed; // plaintext event
 
   const key = process.env.ENCRYPT_KEY;
   if (!key) throw new Error('ENCRYPT_KEY missing but payload is encrypted.');
 
-  // Feishu uses AES-256-CBC with PKCS#7; key is derived via SHA256(ENCRYPT_KEY)
   const aesKey = crypto.createHash('sha256').update(key, 'utf8').digest(); // 32 bytes
-  // The encrypted blob is base64 JSON: { iv, cipherText }
   const encBuf = Buffer.from(parsed.encrypt, 'base64');
-  // Payload format: 16-byte IV + cipherText
+  if (encBuf.length < 17) throw new Error('Invalid encrypt payload (too short).');
+
   const iv = encBuf.subarray(0, 16);
   const cipherText = encBuf.subarray(16);
+
   const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
   decipher.setAutoPadding(true);
   let decrypted = decipher.update(cipherText, undefined, 'utf8');
   decrypted += decipher.final('utf8');
+
   return JSON.parse(decrypted);
 }
 
@@ -160,12 +115,23 @@ export default async function handler(req, res) {
 
   const rawBody = await readRawBody(req);
 
-  // Grab headers (Feishu/Lark uses these names)
+  // Feishu/Lark headers
   const hSig = req.headers['x-lark-signature'] || req.headers['x-feishu-signature'];
   const hTs  = req.headers['x-lark-request-timestamp'] || req.headers['x-feishu-request-timestamp'];
   const hN   = req.headers['x-lark-request-nonce'] || req.headers['x-feishu-request-nonce'];
 
-  // ---- Verify v2 signature if header present ----
+  if (process.env.DEBUG_LOG_BODY === '1') {
+    try {
+      console.info('[incoming][pre-verify]', {
+        headers: { hasSig: !!hSig, ts: String(hTs || ''), nonce: String(hN || ''), sigLen: String(hSig || '').length },
+        rawBodyLength: rawBody.length,
+        hasEncryptField: /"encrypt"\s*:/.test(rawBody),
+        rawBodyHead: rawBody.slice(0, 160),
+      });
+    } catch {}
+  }
+
+  // Verify signature (if header present)
   if (hSig) {
     const ok = verifyV2Signature({
       timestamp: String(hTs || ''),
@@ -175,43 +141,20 @@ export default async function handler(req, res) {
       appSecret: process.env.APP_SECRET,
     });
     if (!ok) {
-      // Provide additional hints without leaking full secrets
-      const baseStringPreview = `${String(hTs || '')}${String(hN || '')}`;
-      // Recompute previews for diagnostics only
-      let calcB64, calcHex;
-      try {
-        const baseString = `${String(hTs || '')}${String(hN || '')}${rawBody}`;
-        calcB64 = crypto.createHmac('sha256', String(process.env.APP_SECRET || ''))
-          .update(baseString).digest('base64');
-        calcHex = crypto.createHmac('sha256', String(process.env.APP_SECRET || ''))
-          .update(baseString).digest('hex');
-      } catch {}
-      console.warn('[auth] signature verification failed', {
-        hasHeader: Boolean(hSig),
-        ts: String(hTs || ''),
-        nonce: String(hN || ''),
-        sigLen: String(hSig || '').length,
-        appSecretPresent: Boolean(process.env.APP_SECRET),
-        calcB64Len: calcB64 ? calcB64.length : undefined,
-        calcHexLen: calcHex ? calcHex.length : undefined,
-        headerPrefix: String(hSig || '').slice(0, 8),
-        calcB64Prefix: calcB64 ? calcB64.slice(0, 8) : undefined,
-        calcHexPrefix: calcHex ? calcHex.slice(0, 8) : undefined,
-        baseStringPreviewLen: baseStringPreview.length + rawBody.length,
-      });
+      console.warn('[auth] signature verification failed');
       return res.status(401).json({ error: 'invalid signature' });
     }
   }
 
-  // ---- Parse (and decrypt if needed) AFTER signature check ----
+  // Parse & decrypt
   let body;
   try {
     body = decryptIfNeeded(rawBody);
   } catch (e) {
+    console.error('[decrypt] failed:', e?.message);
     return res.status(400).json({ error: 'bad payload/decrypt failed' });
   }
 
-  // ---- Optional: emit body structure for debugging (no secrets) ----
   if (process.env.DEBUG_LOG_BODY === '1') {
     try {
       const topKeys = body && typeof body === 'object' ? Object.keys(body) : [];
@@ -229,26 +172,22 @@ export default async function handler(req, res) {
     } catch {}
   }
 
-  // ---- url_verification handshake ----
+  // URL verification
   if (body.type === 'url_verification') {
-    // If encrypted, decryptIfNeeded already gave us the plain object with challenge
     return res.status(200).json({ challenge: body.challenge });
   }
 
-  // ---- Optional: legacy token check (for Event v2, token is in body.header.token) ----
+  // Optional legacy token check
   const expectedToken = process.env.VERIFICATION_TOKEN;
   if (expectedToken) {
-    const tokenInBody = body?.header?.token || body?.token; // some payloads use body.token
+    const tokenInBody = body?.header?.token || body?.token;
     if (tokenInBody !== expectedToken) {
-      console.warn('[auth] verification token mismatch', {
-        expectedPresent: Boolean(expectedToken),
-        receivedPresent: Boolean(tokenInBody),
-      });
+      console.warn('[auth] verification token mismatch');
       return res.status(401).json({ error: 'invalid verification token' });
     }
   }
 
-  // ---- Events ----
+  // Events
   const event = body.event;
   if (event?.type === 'im.message.receive_v1') {
     const { chat_id, content, message_type, chat_type, message_id } = event.message;
@@ -264,7 +203,6 @@ export default async function handler(req, res) {
 
     try {
       if (chat_type === 'p2p') {
-        // For p2p, chat_id is valid with receive_id_type=chat_id
         await client.im.v1.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
@@ -283,18 +221,14 @@ export default async function handler(req, res) {
         });
       }
     } catch (err) {
-      const maybeResp = err?.response?.data;
       console.error('[lark api] send message failed', {
-        name: err?.name,
-        message: err?.message,
-        code: err?.code,
-        status: err?.status,
-        data: maybeResp,
+        name: err?.name, message: err?.message, code: err?.code, status: err?.status, data: err?.response?.data,
       });
-      // Do not throw; still ack below to avoid retries
+      // Still ACK below
     }
   }
 
-  // Always ACK quickly so Feishu doesn’t retry
+  // Always ACK to avoid retries
   return res.status(200).json({ ok: true });
 }
+
