@@ -63,20 +63,47 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
     providedSig = providedSig.slice(eqIdx + 1).trim();
   }
 
-  const baseString = `${timestamp}${nonce}${body}`; // exact concatenation, no separators
-  const hmacBytes = crypto.createHmac('sha256', appSecret).update(baseString).digest(); // Buffer
-  const hmacHex = hmacBytes.toString('hex');
-  const hmacB64 = hmacBytes.toString('base64');
+  // Attempt to parse encrypt to detect encrypted payloads
+  let parsedEncrypt = undefined;
+  try {
+    const parsedMaybe = JSON.parse(body);
+    if (parsedMaybe && typeof parsedMaybe.encrypt === 'string') parsedEncrypt = parsedMaybe.encrypt;
+  } catch {}
+
+  // If encrypted: Variant B ONLY (timestamp + nonce + encrypt). Else: Variant A ONLY (timestamp + nonce + rawBody)
+  let baseStringA = null;
+  let hmacA = null;
+  let hmacAHex = null;
+  let hmacAB64 = null;
+
+  let baseStringB = null;
+  let hmacB = null;
+  let hmacBHex = null;
+  let hmacBB64 = null;
+
+  if (parsedEncrypt) {
+    baseStringB = `${timestamp}${nonce}${parsedEncrypt}`;
+    hmacB = crypto.createHmac('sha256', appSecret).update(baseStringB).digest();
+    hmacBHex = hmacB.toString('hex');
+    hmacBB64 = hmacB.toString('base64');
+  } else {
+    baseStringA = `${timestamp}${nonce}${body}`;
+    hmacA = crypto.createHmac('sha256', appSecret).update(baseStringA).digest();
+    hmacAHex = hmacA.toString('hex');
+    hmacAB64 = hmacA.toString('base64');
+  }
 
   if (process.env.DEBUG_SIGNING === '1') {
     try {
       console.info('[auth][debug] signing details', {
         header: String(signature).slice(0, 128),
-        calcB64: hmacB64.slice(0, 128),
-        calcHex: hmacHex.slice(0, 128),
-        baseStringHead: baseString.slice(0, 128),
-        baseStringTail: baseString.slice(-128),
-        baseStringLength: baseString.length,
+        calcB64_A: hmacAB64 ? hmacAB64.slice(0, 128) : undefined,
+        calcHex_A: hmacAHex ? hmacAHex.slice(0, 128) : undefined,
+        calcB64_B: hmacBB64 ? hmacBB64.slice(0, 128) : undefined,
+        calcHex_B: hmacBHex ? hmacBHex.slice(0, 128) : undefined,
+        baseStringAHead: baseStringA ? baseStringA.slice(0, 128) : undefined,
+        baseStringATail: baseStringA ? baseStringA.slice(-128) : undefined,
+        baseStringALength: baseStringA ? baseStringA.length : undefined,
       });
     } catch {}
   }
@@ -85,16 +112,22 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
   if (/^[0-9a-f]{64}$/i.test(providedSig)) {
     const sigHexLower = providedSig.toLowerCase();
     // Compare hex strings in constant time by comparing bytes of strings
-    const calcBuf = Buffer.from(hmacHex, 'utf8');
-    const sigBuf = Buffer.from(sigHexLower, 'utf8');
-    if (calcBuf.length === sigBuf.length && crypto.timingSafeEqual(calcBuf, sigBuf)) return true;
+    const tryHex = parsedEncrypt ? [hmacBHex] : [hmacAHex];
+    for (const calcHex of tryHex) {
+      const calcBuf = Buffer.from(calcHex, 'utf8');
+      const sigBuf = Buffer.from(sigHexLower, 'utf8');
+      if (calcBuf.length === sigBuf.length && crypto.timingSafeEqual(calcBuf, sigBuf)) return true;
+    }
     return false;
   }
 
   // Otherwise, attempt base64
   try {
     const headerBytes = Buffer.from(providedSig, 'base64');
-    if (headerBytes.length === hmacBytes.length && crypto.timingSafeEqual(hmacBytes, headerBytes)) return true;
+    const tryB64 = parsedEncrypt ? [hmacB] : [hmacA];
+    for (const calc of tryB64) {
+      if (headerBytes.length === calc.length && crypto.timingSafeEqual(calc, headerBytes)) return true;
+    }
   } catch {}
 
   return false;
