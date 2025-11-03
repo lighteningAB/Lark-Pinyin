@@ -65,15 +65,15 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
 
   const baseString = `${timestamp}${nonce}${body}`; // exact concatenation, no separators
   const hmacBytes = crypto.createHmac('sha256', appSecret).update(baseString).digest(); // Buffer
+  const hmacHex = hmacBytes.toString('hex');
+  const hmacB64 = hmacBytes.toString('base64');
 
   if (process.env.DEBUG_SIGNING === '1') {
     try {
-      const calcB64Dbg = Buffer.from(hmacBytes).toString('base64');
-      const calcHexDbg = Buffer.from(hmacBytes).toString('hex');
       console.info('[auth][debug] signing details', {
         header: String(signature).slice(0, 128),
-        calcB64: calcB64Dbg.slice(0, 128),
-        calcHex: calcHexDbg.slice(0, 128),
+        calcB64: hmacB64.slice(0, 128),
+        calcHex: hmacHex.slice(0, 128),
         baseStringHead: baseString.slice(0, 128),
         baseStringTail: baseString.slice(-128),
         baseStringLength: baseString.length,
@@ -81,24 +81,21 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
     } catch {}
   }
 
-  // Preferred: header is base64
+  // Prefer hex (per CN docs where header may be lowercase hex)
+  if (/^[0-9a-f]{64}$/i.test(providedSig)) {
+    const sigHexLower = providedSig.toLowerCase();
+    // Compare hex strings in constant time by comparing bytes of strings
+    const calcBuf = Buffer.from(hmacHex, 'utf8');
+    const sigBuf = Buffer.from(sigHexLower, 'utf8');
+    if (calcBuf.length === sigBuf.length && crypto.timingSafeEqual(calcBuf, sigBuf)) return true;
+    return false;
+  }
+
+  // Otherwise, attempt base64
   try {
     const headerBytes = Buffer.from(providedSig, 'base64');
-    // Valid base64 will decode to 32 bytes for SHA256
-    if (headerBytes.length === hmacBytes.length && crypto.timingSafeEqual(hmacBytes, headerBytes)) {
-      return true;
-    }
+    if (headerBytes.length === hmacBytes.length && crypto.timingSafeEqual(hmacBytes, headerBytes)) return true;
   } catch {}
-
-  // Fallback: if header looks like hex (64 hex chars), accept it for compatibility
-  if (/^[0-9a-f]{64}$/i.test(providedSig)) {
-    try {
-      const headerHex = Buffer.from(providedSig, 'hex');
-      if (headerHex.length === hmacBytes.length && crypto.timingSafeEqual(hmacBytes, headerHex)) {
-        return true;
-      }
-    } catch {}
-  }
 
   return false;
 }
