@@ -25,11 +25,15 @@ async function readRawBody(req) {
 
 /** v2 Signature verification (HMAC-SHA256, base64) */
 function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
-  if (!timestamp || !nonce || !signature) return false;
+  if (!timestamp || !nonce || !signature || !appSecret) return false;
+  const normSig = String(signature).trim();
   // Concatenate exactly: timestamp + nonce + body
   const baseString = `${timestamp}${nonce}${body}`;
   const calc = crypto.createHmac('sha256', appSecret).update(baseString).digest('base64');
-  return crypto.timingSafeEqual(Buffer.from(calc), Buffer.from(signature));
+  const calcBuf = Buffer.from(calc, 'utf8');
+  const sigBuf = Buffer.from(normSig, 'utf8');
+  if (calcBuf.length !== sigBuf.length) return false;
+  return crypto.timingSafeEqual(calcBuf, sigBuf);
 }
 
 /** Optional decryption if you enabled "Encrypt Key" */
