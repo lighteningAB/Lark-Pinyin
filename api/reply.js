@@ -57,11 +57,24 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
   const normSig = String(signature).trim();
   // Concatenate exactly: timestamp + nonce + body
   const baseString = `${timestamp}${nonce}${body}`;
-  const calc = crypto.createHmac('sha256', appSecret).update(baseString).digest('base64');
-  const calcBuf = Buffer.from(calc, 'utf8');
-  const sigBuf = Buffer.from(normSig, 'utf8');
-  if (calcBuf.length !== sigBuf.length) return false;
-  return crypto.timingSafeEqual(calcBuf, sigBuf);
+  const hmac = crypto.createHmac('sha256', appSecret).update(baseString);
+  const calcB64 = hmac.digest('base64');
+  // Recompute for hex without reusing a consumed HMAC instance
+  const calcHex = crypto.createHmac('sha256', appSecret).update(baseString).digest('hex');
+
+  // Determine encoding by comparing lengths first (avoids early content checks)
+  const tryPairs = [
+    { enc: 'base64', calc: calcB64 },
+    { enc: 'hex', calc: calcHex },
+  ];
+
+  for (const { calc } of tryPairs) {
+    const calcBuf = Buffer.from(calc, 'utf8');
+    const sigBuf = Buffer.from(normSig, 'utf8');
+    if (calcBuf.length !== sigBuf.length) continue;
+    if (crypto.timingSafeEqual(calcBuf, sigBuf)) return true;
+  }
+  return false;
 }
 
 /** Optional decryption if you enabled "Encrypt Key" */
