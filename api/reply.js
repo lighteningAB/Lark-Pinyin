@@ -13,6 +13,16 @@ const client = new Client({
   domain: process.env.BASE_DOMAIN, // Feishu CN vs LarkSuite Global
 });
 
+// Basic env validation to surface common 401 causes
+if (!process.env.APP_ID || !process.env.APP_SECRET) {
+  console.error('[config] Missing APP_ID or APP_SECRET');
+}
+if (!process.env.BASE_DOMAIN) {
+  console.warn('[config] BASE_DOMAIN not set. Expected something like "larksuite" or "feishu" depending on region.');
+} else {
+  console.info('[config] BASE_DOMAIN =', process.env.BASE_DOMAIN);
+}
+
 /** Read raw body as string (required for signature verification) */
 async function readRawBody(req) {
   return await new Promise((resolve, reject) => {
@@ -119,23 +129,36 @@ export default async function handler(req, res) {
       responseText = '解析消息失败，请发送文本消息 \nparse message failed, please send text message';
     }
 
-    if (chat_type === 'p2p') {
-      await client.im.v1.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chat_id,
-          content: JSON.stringify({ text: `收到你发送的消息:${responseText}\nReceived message: ${responseText}` }),
-          msg_type: 'text',
-        },
+    try {
+      if (chat_type === 'p2p') {
+        // For p2p, chat_id is valid with receive_id_type=chat_id
+        await client.im.v1.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chat_id,
+            content: JSON.stringify({ text: `收到你发送的消息:${responseText}\nReceived message: ${responseText}` }),
+            msg_type: 'text',
+          },
+        });
+      } else {
+        await client.im.v1.message.reply({
+          path: { message_id },
+          data: {
+            content: JSON.stringify({ text: `收到你发送的消息:${responseText}\nReceived message: ${responseText}` }),
+            msg_type: 'text',
+          },
+        });
+      }
+    } catch (err) {
+      const maybeResp = err?.response?.data;
+      console.error('[lark api] send message failed', {
+        name: err?.name,
+        message: err?.message,
+        code: err?.code,
+        status: err?.status,
+        data: maybeResp,
       });
-    } else {
-      await client.im.v1.message.reply({
-        path: { message_id },
-        data: {
-          content: JSON.stringify({ text: `收到你发送的消息:${responseText}\nReceived message: ${responseText}` }),
-          msg_type: 'text',
-        },
-      });
+      // Do not throw; still ack below to avoid retries
     }
   }
 
