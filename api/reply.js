@@ -106,6 +106,13 @@ export default async function handler(req, res) {
       appSecret: process.env.APP_SECRET,
     });
     if (!ok) {
+      console.warn('[auth] signature verification failed', {
+        hasHeader: Boolean(hSig),
+        ts: String(hTs || ''),
+        nonce: String(hN || ''),
+        sigLen: String(hSig || '').length,
+        appSecretPresent: Boolean(process.env.APP_SECRET),
+      });
       return res.status(401).json({ error: 'invalid signature' });
     }
   }
@@ -129,6 +136,10 @@ export default async function handler(req, res) {
   if (expectedToken) {
     const tokenInBody = body?.header?.token || body?.token; // some payloads use body.token
     if (tokenInBody !== expectedToken) {
+      console.warn('[auth] verification token mismatch', {
+        expectedPresent: Boolean(expectedToken),
+        receivedPresent: Boolean(tokenInBody),
+      });
       return res.status(401).json({ error: 'invalid verification token' });
     }
   }
