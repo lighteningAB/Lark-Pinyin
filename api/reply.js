@@ -60,24 +60,27 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
   if (eqIdx > 0 && /^[a-z0-9]+$/i.test(normSig.slice(0, eqIdx))) {
     normSig = normSig.slice(eqIdx + 1).trim();
   }
-  // Concatenate exactly: timestamp + nonce + body
-  const baseString = `${timestamp}${nonce}${body}`;
-  const hmac = crypto.createHmac('sha256', appSecret).update(baseString);
-  const calcB64 = hmac.digest('base64');
-  // Recompute for hex without reusing a consumed HMAC instance
-  const calcHex = crypto.createHmac('sha256', appSecret).update(baseString).digest('hex');
-
-  // Determine encoding by comparing lengths first (avoids early content checks)
-  const tryPairs = [
-    { enc: 'base64', calc: calcB64 },
-    { enc: 'hex', calc: calcHex },
+  // Try multiple concatenation variants to diagnose formatting mismatches
+  const variants = [
+    { name: 'ts+nonce+body', str: `${timestamp}${nonce}${body}` },
+    { name: 'ts+body+nonce', str: `${timestamp}${body}${nonce}` },
+    { name: 'nonce+ts+body', str: `${nonce}${timestamp}${body}` },
+    { name: 'body+ts+nonce', str: `${body}${timestamp}${nonce}` },
   ];
 
-  for (const { calc } of tryPairs) {
-    const calcBuf = Buffer.from(calc, 'utf8');
-    const sigBuf = Buffer.from(normSig, 'utf8');
-    if (calcBuf.length !== sigBuf.length) continue;
-    if (crypto.timingSafeEqual(calcBuf, sigBuf)) return true;
+  for (const variant of variants) {
+    const calcB64 = crypto.createHmac('sha256', appSecret).update(variant.str).digest('base64');
+    const calcHex = crypto.createHmac('sha256', appSecret).update(variant.str).digest('hex');
+    const candidates = [calcB64, calcHex];
+    for (const calc of candidates) {
+      const calcBuf = Buffer.from(calc, 'utf8');
+      const sigBuf = Buffer.from(normSig, 'utf8');
+      if (calcBuf.length !== sigBuf.length) continue;
+      if (crypto.timingSafeEqual(calcBuf, sigBuf)) {
+        // Side-channel safe success
+        return true;
+      }
+    }
   }
   return false;
 }
