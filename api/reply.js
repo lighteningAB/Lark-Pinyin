@@ -54,7 +54,12 @@ async function readRawBody(req) {
 /** v2 Signature verification (HMAC-SHA256, base64) */
 function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
   if (!timestamp || !nonce || !signature || !appSecret) return false;
-  const normSig = String(signature).trim();
+  let normSig = String(signature).trim();
+  // Normalize formats like "sha256=..." or "v1=..."
+  const eqIdx = normSig.indexOf('=');
+  if (eqIdx > 0 && /^[a-z0-9]+$/i.test(normSig.slice(0, eqIdx))) {
+    normSig = normSig.slice(eqIdx + 1).trim();
+  }
   // Concatenate exactly: timestamp + nonce + body
   const baseString = `${timestamp}${nonce}${body}`;
   const hmac = crypto.createHmac('sha256', appSecret).update(baseString);
@@ -119,12 +124,29 @@ export default async function handler(req, res) {
       appSecret: process.env.APP_SECRET,
     });
     if (!ok) {
+      // Provide additional hints without leaking full secrets
+      const baseStringPreview = `${String(hTs || '')}${String(hN || '')}`;
+      // Recompute previews for diagnostics only
+      let calcB64, calcHex;
+      try {
+        const baseString = `${String(hTs || '')}${String(hN || '')}${rawBody}`;
+        calcB64 = crypto.createHmac('sha256', String(process.env.APP_SECRET || ''))
+          .update(baseString).digest('base64');
+        calcHex = crypto.createHmac('sha256', String(process.env.APP_SECRET || ''))
+          .update(baseString).digest('hex');
+      } catch {}
       console.warn('[auth] signature verification failed', {
         hasHeader: Boolean(hSig),
         ts: String(hTs || ''),
         nonce: String(hN || ''),
         sigLen: String(hSig || '').length,
         appSecretPresent: Boolean(process.env.APP_SECRET),
+        calcB64Len: calcB64 ? calcB64.length : undefined,
+        calcHexLen: calcHex ? calcHex.length : undefined,
+        headerPrefix: String(hSig || '').slice(0, 8),
+        calcB64Prefix: calcB64 ? calcB64.slice(0, 8) : undefined,
+        calcHexPrefix: calcHex ? calcHex.slice(0, 8) : undefined,
+        baseStringPreviewLen: baseStringPreview.length + rawBody.length,
       });
       return res.status(401).json({ error: 'invalid signature' });
     }
