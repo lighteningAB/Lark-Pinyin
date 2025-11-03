@@ -66,6 +66,21 @@ function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
   const baseString = `${timestamp}${nonce}${body}`; // exact concatenation, no separators
   const hmacBytes = crypto.createHmac('sha256', appSecret).update(baseString).digest(); // Buffer
 
+  if (process.env.DEBUG_SIGNING === '1') {
+    try {
+      const calcB64Dbg = Buffer.from(hmacBytes).toString('base64');
+      const calcHexDbg = Buffer.from(hmacBytes).toString('hex');
+      console.info('[auth][debug] signing details', {
+        header: String(signature).slice(0, 128),
+        calcB64: calcB64Dbg.slice(0, 128),
+        calcHex: calcHexDbg.slice(0, 128),
+        baseStringHead: baseString.slice(0, 128),
+        baseStringTail: baseString.slice(-128),
+        baseStringLength: baseString.length,
+      });
+    } catch {}
+  }
+
   // Preferred: header is base64
   try {
     const headerBytes = Buffer.from(providedSig, 'base64');
