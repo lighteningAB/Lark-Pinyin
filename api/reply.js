@@ -7,10 +7,27 @@ export const config = {
   api: { bodyParser: false },
 };
 
+function normalizeBaseDomain(input) {
+  if (!input) return undefined;
+  const val = String(input).trim().toLowerCase();
+  // Accept shorthand identifiers used by SDK
+  if (val === 'larksuite' || val === 'lark' || val === 'feishu') return val === 'lark' ? 'larksuite' : val;
+  // Accept full URLs and map hostnames
+  try {
+    const url = new URL(val.startsWith('http') ? val : `https://${val}`);
+    const host = url.hostname;
+    if (host.includes('feishu')) return 'feishu';
+    if (host.includes('larksuite') || host.includes('lark')) return 'larksuite';
+  } catch {}
+  return undefined;
+}
+
+const resolvedDomain = normalizeBaseDomain(process.env.BASE_DOMAIN);
+
 const client = new Client({
   appId: process.env.APP_ID,
   appSecret: process.env.APP_SECRET,
-  domain: process.env.BASE_DOMAIN, // Feishu CN vs LarkSuite Global
+  domain: resolvedDomain, // 'feishu' (CN) or 'larksuite' (Global)
 });
 
 // Basic env validation to surface common 401 causes
@@ -18,10 +35,11 @@ if (!process.env.APP_ID || !process.env.APP_SECRET) {
   console.error('[config] Missing APP_ID or APP_SECRET');
 }
 if (!process.env.BASE_DOMAIN) {
-  console.warn('[config] BASE_DOMAIN not set. Expected something like "larksuite" or "feishu" depending on region.');
+  console.warn('[config] BASE_DOMAIN not set. Expected "larksuite" or "feishu" (or a known open domain URL).');
 } else {
   console.info('[config] BASE_DOMAIN =', process.env.BASE_DOMAIN);
 }
+console.info('[config] Resolved SDK domain =', resolvedDomain || '(default)');
 
 /** Read raw body as string (required for signature verification) */
 async function readRawBody(req) {
