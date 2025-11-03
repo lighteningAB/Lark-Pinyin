@@ -211,6 +211,24 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'bad payload/decrypt failed' });
   }
 
+  // ---- Optional: emit body structure for debugging (no secrets) ----
+  if (process.env.DEBUG_LOG_BODY === '1') {
+    try {
+      const topKeys = body && typeof body === 'object' ? Object.keys(body) : [];
+      const headerKeys = body?.header && typeof body.header === 'object' ? Object.keys(body.header) : [];
+      const eventKeys = body?.event && typeof body.event === 'object' ? Object.keys(body.event) : [];
+      console.info('[incoming] structure', {
+        hasEncryptField: /"encrypt"\s*:/.test(rawBody),
+        rawBodyLength: rawBody.length,
+        schema: body?.schema,
+        type: body?.type,
+        headerKeys,
+        eventKeys,
+        topKeys,
+      });
+    } catch {}
+  }
+
   // ---- url_verification handshake ----
   if (body.type === 'url_verification') {
     // If encrypted, decryptIfNeeded already gave us the plain object with challenge
