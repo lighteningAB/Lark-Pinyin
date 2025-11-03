@@ -53,35 +53,38 @@ async function readRawBody(req) {
 
 /** v2 Signature verification (HMAC-SHA256, base64) */
 function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
+  // Per docs: signature v2 uses HMAC-SHA256 over (timestamp + nonce + rawBody), output base64
   if (!timestamp || !nonce || !signature || !appSecret) return false;
-  let normSig = String(signature).trim();
-  // Normalize formats like "sha256=..." or "v1=..."
-  const eqIdx = normSig.indexOf('=');
-  if (eqIdx > 0 && /^[a-z0-9]+$/i.test(normSig.slice(0, eqIdx))) {
-    normSig = normSig.slice(eqIdx + 1).trim();
-  }
-  // Try multiple concatenation variants to diagnose formatting mismatches
-  const variants = [
-    { name: 'ts+nonce+body', str: `${timestamp}${nonce}${body}` },
-    { name: 'ts+body+nonce', str: `${timestamp}${body}${nonce}` },
-    { name: 'nonce+ts+body', str: `${nonce}${timestamp}${body}` },
-    { name: 'body+ts+nonce', str: `${body}${timestamp}${nonce}` },
-  ];
 
-  for (const variant of variants) {
-    const calcB64 = crypto.createHmac('sha256', appSecret).update(variant.str).digest('base64');
-    const calcHex = crypto.createHmac('sha256', appSecret).update(variant.str).digest('hex');
-    const candidates = [calcB64, calcHex];
-    for (const calc of candidates) {
-      const calcBuf = Buffer.from(calc, 'utf8');
-      const sigBuf = Buffer.from(normSig, 'utf8');
-      if (calcBuf.length !== sigBuf.length) continue;
-      if (crypto.timingSafeEqual(calcBuf, sigBuf)) {
-        // Side-channel safe success
+  // Normalize header like "sha256=..." or "v1=..." if present
+  let providedSig = String(signature).trim();
+  const eqIdx = providedSig.indexOf('=');
+  if (eqIdx > 0 && /^[a-z0-9]+$/i.test(providedSig.slice(0, eqIdx))) {
+    providedSig = providedSig.slice(eqIdx + 1).trim();
+  }
+
+  const baseString = `${timestamp}${nonce}${body}`; // exact concatenation, no separators
+  const hmacBytes = crypto.createHmac('sha256', appSecret).update(baseString).digest(); // Buffer
+
+  // Preferred: header is base64
+  try {
+    const headerBytes = Buffer.from(providedSig, 'base64');
+    // Valid base64 will decode to 32 bytes for SHA256
+    if (headerBytes.length === hmacBytes.length && crypto.timingSafeEqual(hmacBytes, headerBytes)) {
+      return true;
+    }
+  } catch {}
+
+  // Fallback: if header looks like hex (64 hex chars), accept it for compatibility
+  if (/^[0-9a-f]{64}$/i.test(providedSig)) {
+    try {
+      const headerHex = Buffer.from(providedSig, 'hex');
+      if (headerHex.length === hmacBytes.length && crypto.timingSafeEqual(hmacBytes, headerHex)) {
         return true;
       }
-    }
+    } catch {}
   }
+
   return false;
 }
 
