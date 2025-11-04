@@ -1,9 +1,9 @@
 import crypto from 'crypto';
 import pinyin from 'pinyin';
-import * as lark from '@larksuiteoapi/node-sdk';
+import { Client } from '@larksuiteoapi/node-sdk';
 
 // ---- Client: match your sample style if you want manual token passing
-const client = new lark.Client({
+const client = new Client({
   appId: process.env.APP_ID,
   appSecret: process.env.APP_SECRET,
   // If you want the SDK to auto-manage tenant token, set DISABLE_TOKEN_CACHE!='1'
