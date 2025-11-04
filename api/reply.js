@@ -179,89 +179,89 @@ module.exports = async function handler(req, res) {
     if (!tokenOk) return res.status(401).json({ error: 'invalid_verification_token' });
   }
 
-  const event = body?.event;
-  console.info('[event]', { eventType: event?.type });
+  // --- NEW: detect event type from v2 header
+const eventType = body?.header?.event_type || body?.event?.type || body?.type;
+console.info('[event] resolved type', { eventType });
 
-  if (event?.type === 'im.message.receive_v1') {
-    const { message, sender } = event;
-    const { content, message_type, chat_type, message_id, chat_id } = message || {};
-    const openId = sender?.sender_id?.open_id;
+// Use the common event payload
+const evt = body?.event;
 
-    let text = '';
-    try { text = message_type === 'text' ? JSON.parse(content).text : ''; } catch {}
-    const replyText = toPinyinEcho(text);
+console.info('[header]', body?.header);
 
-    const logSdkError = (label, err) => {
-      const payload = err?.response?.data || err;
-      console.error(`[send][${label}] failed`, JSON.stringify(payload, null, 2));
-    };
+if (eventType === 'im.message.receive_v1' && evt) {
+  const { message, sender } = evt;
+  const { content, message_type, chat_type, message_id, chat_id } = message || {};
+  const openId = sender?.sender_id?.open_id;
 
-    // 1) Reply in thread
+  // Extract text
+  let text = '';
+  try { text = message_type === 'text' ? JSON.parse(content).text : ''; } catch {}
+  const replyText = toPinyinEcho(text);
+
+  const logSdkError = (label, err) => {
+    const payload = err?.response?.data || err;
+    console.error(`[send][${label}] failed`, JSON.stringify(payload, null, 2));
+  };
+
+  // 1) Reply in-thread
+  try {
+    const resp = await client.im.message.reply(
+      { path: { message_id }, data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) } },
+      ...tenantOpt()
+    );
+    console.info('[send][reply] ok', resp?.data?.data?.message_id || '');
+    return res.status(200).json({ ok: true, via: 'reply' });
+  } catch (e) {
+    logSdkError('reply', e);
+  }
+
+  // 2) Send to chat_id
+  if (chat_id) {
     try {
-      const resp = await client.im.message.reply(
+      const resp = await client.im.message.create(
         {
-          path: { message_id },
-          data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) },
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chat_id,
+            msg_type: 'text',
+            content: JSON.stringify({ text: replyText }),
+            uuid: crypto.randomUUID(),
+          },
         },
         ...tenantOpt()
       );
-      console.info('[send][reply] ok', resp?.data?.data?.message_id || '');
-      return res.status(200).json({ ok: true, via: 'reply' });
+      console.info('[send][create:chat_id] ok', resp?.data?.data?.message_id || '');
+      return res.status(200).json({ ok: true, via: 'create:chat_id' });
     } catch (e) {
-      logSdkError('reply', e);
+      logSdkError('create:chat_id', e);
     }
-
-    // 2) Send to chat_id
-    if (chat_id) {
-      try {
-        const resp = await client.im.message.create(
-          {
-            params: { receive_id_type: 'chat_id' },
-            data: {
-              receive_id: chat_id,
-              msg_type: 'text',
-              content: JSON.stringify({ text: replyText }),
-              uuid: crypto.randomUUID(),
-            },
-          },
-          ...tenantOpt()
-        );
-        console.info('[send][create:chat_id] ok', resp?.data?.data?.message_id || '');
-        return res.status(200).json({ ok: true, via: 'create:chat_id' });
-      } catch (e) {
-        logSdkError('create:chat_id', e);
-      }
-    }
-
-    // 3) Send to open_id
-    if (openId) {
-      try {
-        const resp = await client.im.message.create(
-          {
-            params: { receive_id_type: 'open_id' },
-            data: {
-              receive_id: openId,
-              msg_type: 'text',
-              content: JSON.stringify({ text: replyText }),
-              uuid: crypto.randomUUID(),
-            },
-          },
-          ...tenantOpt()
-        );
-        console.info('[send][create:open_id] ok', resp?.data?.data?.message_id || '');
-        return res.status(200).json({ ok: true, via: 'create:open_id' });
-      } catch (e) {
-        logSdkError('create:open_id', e);
-      }
-    }
-
-    console.error('[send] all paths failed');
-    return res.status(200).json({ ok: false, error: 'all_send_paths_failed' });
   }
 
-  console.info('[event] not a message event, ack only');
-  return res.status(200).json({ ok: true, info: 'non-message event' });
-};
+  // 3) Send to open_id
+  if (openId) {
+    try {
+      const resp = await client.im.message.create(
+        {
+          params: { receive_id_type: 'open_id' },
+          data: {
+            receive_id: openId,
+            msg_type: 'text',
+            content: JSON.stringify({ text: replyText }),
+            uuid: crypto.randomUUID(),
+          },
+        },
+        ...tenantOpt()
+      );
+      console.info('[send][create:open_id] ok', resp?.data?.data?.message_id || '');
+      return res.status(200).json({ ok: true, via: 'create:open_id' });
+    } catch (e) {
+      logSdkError('create:open_id', e);
+    }
+  }
 
-// Extra: make Next happy in any module-config edge case
-module.exports.default = module.exports;
+  console.error('[send] all paths failed');
+  return res.status(200).json({ ok: false, error: 'all_send_paths_failed' });
+}
+
+console.info('[event] not a message event, ack only', { eventType });
+return res.status(200).json({ ok: true, info: 'non-message event' });
