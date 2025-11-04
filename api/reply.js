@@ -115,7 +115,7 @@ function toPinyinEcho(text) {
       py = pinyin(text, { style: pinyin.STYLE_TONE }).flat().join(' ');
     }
   } catch {}
-  return `Echo: ${text || ''}\nPinyin: ${py || '(n/a)'}`;
+  return `${py || '(n/a)'}`;
 }
 
 module.exports = async function handler(req, res) {
