@@ -1,6 +1,6 @@
 // pages/api/reply.js  (CommonJS)
 const crypto = require('crypto');
-const pinyin = require('pinyin');
+const pinyin = require('pinyin').default;
 const lark = require('@larksuiteoapi/node-sdk');
 
 module.exports.config = { api: { bodyParser: false } };
@@ -112,7 +112,7 @@ function toPinyinEcho(text) {
   let py = '';
   try {
     if (text && text.trim()) {
-      py = pinyin(text, { style: pinyin.STYLE_TONE2 }).flat().join(' ');
+      py = pinyin(text, { style: pinyin.STYLE_TONE }).flat().join(' ');
     }
   } catch {}
   return `Echo: ${text || ''}\nPinyin: ${py || '(n/a)'}`;
