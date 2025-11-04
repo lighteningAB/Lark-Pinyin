@@ -264,4 +264,4 @@ if (eventType === 'im.message.receive_v1' && evt) {
 }
 
 console.info('[event] not a message event, ack only', { eventType });
-return res.status(200).json({ ok: true, info: 'non-message event' });
+return res.status(200).json({ ok: true, info: 'non-message event' })};
