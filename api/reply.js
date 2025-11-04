@@ -1,16 +1,40 @@
-// api/reply.js
 import crypto from 'crypto';
-import { Client } from '@larksuiteoapi/node-sdk';
+import pinyin from 'pinyin';
+import * as lark from '@larksuiteoapi/node-sdk';
+
+// ---- Client: match your sample style if you want manual token passing
+const client = new lark.Client({
+  appId: process.env.APP_ID,
+  appSecret: process.env.APP_SECRET,
+  // If you want the SDK to auto-manage tenant token, set DISABLE_TOKEN_CACHE!='1'
+  disableTokenCache,
+  // Optional: set domain if needed: 'larksuite' (Global) or 'feishu' (CN)
+  domain: process.env.BASE_DOMAIN || undefined,
+});
+
+// Helper: optional withTenantToken if you're disabling cache
+function tenantOpt() {
+  if (disableTokenCache && process.env.TENANT_ACCESS_TOKEN) {
+    return [lark.withTenantToken(process.env.TENANT_ACCESS_TOKEN)];
+  }
+  return []; // SDK-managed token
+}
+
+// Utility: build "Echo + Pinyin" text
+function toPinyinEcho(text) {
+  let py = '';
+  try {
+    if (text && text.trim()) {
+      // STYLE_TONE2 gives "ni3 hao3"; change to STYLE_TONE for diacritics
+      py = pinyin(text, { style: pinyin.STYLE_TONE2 }).flat().join(' ');
+    }
+  } catch {}
+  return `Echo: ${text || ''}\nPinyin: ${py || '(n/a)'}`;
+}
 
 // --- Vercel: keep raw body for signature verification
 export const config = { api: { bodyParser: false } };
 
-// --- Minimal Lark/Feishu SDK client
-const client = new Client({
-  appId: process.env.APP_ID,
-  appSecret: process.env.APP_SECRET,
-  domain: process.env.BASE_DOMAIN || undefined, // 'larksuite' (Global) or 'feishu' (CN)
-});
 
 // --- Raw body reader
 async function readRawBody(req) {
@@ -200,44 +224,65 @@ export default async function handler(req, res) {
     }
   }
 
-  // --- Minimal event handling
-  const event = body?.event;
-  if (event?.type === 'im.message.receive_v1') {
-    const { chat_id, content, message_type, chat_type, message_id } = event.message;
+  // After you've verified signature + decrypted and have `body`:
+const event = body?.event;
 
-    let text = '';
-    try {
-      text = message_type === 'text'
-        ? JSON.parse(content).text
-        : 'Please send a text message.';
-    } catch {
-      text = 'Please send a text message.';
-    }
+if (event?.type === 'im.message.receive_v1') {
+  const { message, sender } = event;
+  const { content, message_type, chat_type, message_id } = message || {};
+  const openId = sender?.sender_id?.open_id; // Preferred target to "create" a message
 
-    try {
-      if (chat_type === 'p2p') {
-        await client.im.v1.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: chat_id,
-            content: JSON.stringify({ text: `Echo: ${text}` }),
-            msg_type: 'text',
-          },
-        });
-      } else {
-        await client.im.v1.message.reply({
-          path: { message_id },
-          data: {
-            content: JSON.stringify({ text: `Echo: ${text}` }),
-            msg_type: 'text',
-          },
-        });
-      }
-    } catch {
-      // Ignore send failures; still ACK
-    }
+  // Safely extract text
+  let text = '';
+  try {
+    text = message_type === 'text' ? JSON.parse(content).text : '';
+  } catch {
+    text = '';
   }
 
-  // --- ACK quickly
-  return res.status(200).json({ ok: true });
+  // Build reply string
+  const replyText = toPinyinEcho(text);
+
+  // Preferred: send like your sample (im.message.create to open_id)
+  if (openId) {
+    try {
+      await client.im.message.create(
+        {
+          params: { receive_id_type: 'open_id' },
+          data: {
+            receive_id: openId,
+            msg_type: 'text',
+            content: JSON.stringify({ text: replyText }), // MUST be a JSON string
+            uuid: crypto.randomUUID(), // your sample includes uuid
+          },
+        },
+        ...tenantOpt()
+      );
+    } catch (e) {
+      // If sending directly to open_id fails, fall back to thread reply
+      try {
+        await client.im.message.reply(
+          {
+            path: { message_id },
+            data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) },
+          },
+          ...tenantOpt()
+        );
+      } catch {}
+    }
+  } else {
+    // Fallback: reply in-place (group or missing open_id)
+    try {
+      await client.im.message.reply(
+        {
+          path: { message_id },
+          data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) },
+        },
+        ...tenantOpt()
+      );
+    } catch {}
+  }
 }
+
+// Always ACK quickly
+return res.status(200).json({ ok: true });
