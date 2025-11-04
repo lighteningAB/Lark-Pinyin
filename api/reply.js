@@ -150,50 +150,88 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  const event = body?.event;
-  if (event?.type === 'im.message.receive_v1') {
-    const { message, sender } = event;
-    const { content, message_type, message_id } = message || {};
-    const openId = sender?.sender_id?.open_id;
+  // inside your POST handler after you parsed/decrypted `body`
+const event = body?.event;
 
-    let text = '';
-    try { text = message_type === 'text' ? JSON.parse(content).text : ''; } catch { text = ''; }
+if (event?.type === 'im.message.receive_v1') {
+  const { message, sender } = event;
+  const { content, message_type, chat_type, message_id, chat_id } = message || {};
+  const openId = sender?.sender_id?.open_id;
 
-    const replyText = toPinyinEcho(text);
+  // Extract text
+  let text = '';
+  try { text = message_type === 'text' ? JSON.parse(content).text : ''; } catch {}
+  const replyText = toPinyinEcho(text);
 
-    // Preferred: send like your sample (create to open_id)
-    if (openId) {
-      try {
-        await client.im.message.create(
-          {
-            params: { receive_id_type: 'open_id' },
-            data: {
-              receive_id: openId,
-              msg_type: 'text',
-              content: JSON.stringify({ text: replyText }),
-              uuid: crypto.randomUUID(),
-            },
+  // Helper to log SDK errors verbosely
+  const logSdkError = (label, err) => {
+    const payload = err?.response?.data || err;
+    console.error(`[send][${label}] failed`, JSON.stringify(payload, null, 2));
+  };
+
+  // 1) Prefer replying in-thread (works for p2p + groups if bot can speak there)
+  try {
+    const resp = await client.im.message.reply(
+      {
+        path: { message_id },
+        data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) },
+      },
+      ...tenantOpt()
+    );
+    console.info('[send][reply] ok', resp?.data?.data?.message_id || '');
+    return res.status(200).json({ ok: true, via: 'reply' });
+  } catch (e) {
+    logSdkError('reply', e);
+  }
+
+  // 2) Try sending to the chat directly using chat_id
+  if (chat_id) {
+    try {
+      const resp = await client.im.message.create(
+        {
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chat_id,
+            msg_type: 'text',
+            content: JSON.stringify({ text: replyText }),
+            uuid: crypto.randomUUID(),
           },
-          ...tenantOpt()
-        );
-      } catch (e) {
-        // Fallback: reply in the thread
-        try {
-          await client.im.message.reply(
-            { path: { message_id }, data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) } },
-            ...tenantOpt()
-          );
-        } catch {}
-      }
-    } else {
-      try {
-        await client.im.message.reply(
-          { path: { message_id }, data: { msg_type: 'text', content: JSON.stringify({ text: replyText }) } },
-          ...tenantOpt()
-        );
-      } catch {}
+        },
+        ...tenantOpt()
+      );
+      console.info('[send][create:chat_id] ok', resp?.data?.data?.message_id || '');
+      return res.status(200).json({ ok: true, via: 'create:chat_id' });
+    } catch (e) {
+      logSdkError('create:chat_id', e);
     }
   }
 
-  return res.status(200).json({ ok: true });
+  // 3) Finally try addressing the user by open_id
+  if (openId) {
+    try {
+      const resp = await client.im.message.create(
+        {
+          params: { receive_id_type: 'open_id' },
+          data: {
+            receive_id: openId,
+            msg_type: 'text',
+            content: JSON.stringify({ text: replyText }),
+            uuid: crypto.randomUUID(),
+          },
+        },
+        ...tenantOpt()
+      );
+      console.info('[send][create:open_id] ok', resp?.data?.data?.message_id || '');
+      return res.status(200).json({ ok: true, via: 'create:open_id' });
+    } catch (e) {
+      logSdkError('create:open_id', e);
+    }
+  }
+
+  // If all paths failed, still ACK the event to avoid retries
+  return res.status(200).json({ ok: false, error: 'all_send_paths_failed' });
+}
+
+// not the message event; just ACK
+return res.status(200).json({ ok: true, info: 'non-message event' })
 };
