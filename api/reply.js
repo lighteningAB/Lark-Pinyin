@@ -2,40 +2,17 @@
 import crypto from 'crypto';
 import { Client } from '@larksuiteoapi/node-sdk';
 
-// -- Vercel: keep raw body for signature verification
+// --- Vercel: keep raw body for signature verification
 export const config = { api: { bodyParser: false } };
 
-// Map base domain to SDK domain
-function normalizeBaseDomain(input) {
-  if (!input) return undefined;
-  const val = String(input).trim().toLowerCase();
-  if (val === 'larksuite' || val === 'lark' || val === 'feishu') return val === 'lark' ? 'larksuite' : val;
-  try {
-    const url = new URL(val.startsWith('http') ? val : `https://${val}`);
-    const host = url.hostname;
-    if (host.includes('feishu')) return 'feishu';
-    if (host.includes('larksuite') || host.includes('lark')) return 'larksuite';
-  } catch {}
-  return undefined;
-}
-
-const resolvedDomain = normalizeBaseDomain(process.env.BASE_DOMAIN);
+// --- Minimal Lark/Feishu SDK client
 const client = new Client({
   appId: process.env.APP_ID,
   appSecret: process.env.APP_SECRET,
-  domain: resolvedDomain, // 'feishu' (CN) or 'larksuite' (Global)
+  domain: process.env.BASE_DOMAIN || undefined, // 'larksuite' (Global) or 'feishu' (CN)
 });
 
-// Basic env validation
-if (!process.env.APP_ID || !process.env.APP_SECRET) console.error('[config] Missing APP_ID or APP_SECRET');
-if (!process.env.BASE_DOMAIN) {
-  console.warn('[config] BASE_DOMAIN not set. Expected "larksuite" or "feishu" (or known open domain URL).');
-} else {
-  console.info('[config] BASE_DOMAIN =', process.env.BASE_DOMAIN);
-}
-console.info('[config] Resolved SDK domain =', resolvedDomain || '(default)');
-
-// Read raw request body
+// --- Raw body reader
 async function readRawBody(req) {
   return await new Promise((resolve, reject) => {
     const chunks = [];
@@ -45,73 +22,97 @@ async function readRawBody(req) {
   });
 }
 
-/** Verify v2 signature.
- * Prefers encrypted variant: HMAC-SHA256(timestamp + nonce + encrypt)
- * Fallback plaintext:        HMAC-SHA256(timestamp + nonce + rawBody)
- * Accepts base64 or hex header; strips "sha256=" / "v2=" prefixes.
- */
-function verifyV2Signature({ timestamp, nonce, signature, body, appSecret }) {
-  if (!timestamp || !nonce || !signature || !appSecret) return false;
+// --- Constant-time compare (Buffers)
+function safeEqual(a, b) {
+  const A = Buffer.isBuffer(a) ? a : Buffer.from(String(a), 'utf8');
+  const B = Buffer.isBuffer(b) ? b : Buffer.from(String(b), 'utf8');
+  return A.length === B.length && crypto.timingSafeEqual(A, B);
+}
 
-  // Normalize header (possibly "sha256=..." or "v2=...")
+/**
+ * Verify signature using Encrypt Key strategy (no HMAC):
+ *   b1 = (timestamp + nonce + encrypt_key).encode('utf-8')
+ *   b  = b1 || bodyBytes ? We need bytes of "timestamp + nonce + encrypt_key" then concatenate raw body string
+ *   s  = sha256(b)  (hex, compare to X-Lark-Signature)
+ * Notes:
+ * - Header may be hex or "sha256=..." prefixed.
+ */
+function verifyEncryptKeySignature({ timestamp, nonce, signature, rawBody, encryptKey }) {
+  if (!timestamp || !nonce || !signature || !encryptKey) return false;
+
+  // Normalize header: allow "sha256=<hex>" or raw hex
   let provided = String(signature).trim();
   const eq = provided.indexOf('=');
-  if (eq > 0 && /^[a-z0-9]+$/i.test(provided.slice(0, eq))) provided = provided.slice(eq + 1).trim();
+  if (eq > 0) provided = provided.slice(eq + 1).trim();
 
-  // Extract encrypt field (without decoding!)
-  let encryptField;
-  try {
-    const maybe = JSON.parse(body);
-    if (maybe && typeof maybe.encrypt === 'string') encryptField = maybe.encrypt;
-  } catch {}
+  // Compute sha256 over bytes of (timestamp + nonce + encrypt_key) + rawBody
+  const headBytes = Buffer.from(`${timestamp}${nonce}${encryptKey}`, 'utf8');
+  const bodyBytes = Buffer.from(rawBody, 'utf8');
+  const combined = Buffer.concat([headBytes, bodyBytes]);
 
-  const candidates = [];
+  const digestHex = crypto.createHash('sha256').update(combined).digest('hex');
 
-  // Variant B: timestamp + nonce + encrypt
-  if (encryptField) {
-    const baseB = `${timestamp}${nonce}${encryptField}`;
-    const hB = crypto.createHmac('sha256', appSecret).update(baseB).digest();
-    candidates.push({ bin: hB, hex: hB.toString('hex') });
-  }
-
-  // Variant A: timestamp + nonce + rawBody
-  const baseA = `${timestamp}${nonce}${body}`;
-  const hA = crypto.createHmac('sha256', appSecret).update(baseA).digest();
-  candidates.push({ bin: hA, hex: hA.toString('hex') });
-
-  if (process.env.DEBUG_SIGNING === '1') {
-    try {
-      console.info('[auth][debug] header (start)=', String(signature).slice(0, 16));
-      if (encryptField) {
-        console.info('[auth][debug] calcB b64=', candidates[0].bin.toString('base64').slice(0, 16),
-                     ' hex=', candidates[0].hex.slice(0, 16), ' (encrypt variant)');
-      }
-      console.info('[auth][debug] calcA b64=', hA.toString('base64').slice(0, 16),
-                   ' hex=', hA.toString('hex').slice(0, 16), ' (rawBody variant)');
-    } catch {}
-  }
-
-  // If header looks like 64-hex, compare as hex
+  // Compare as hex (header may be hex or base64—doc typically uses hex)
   if (/^[0-9a-f]{64}$/i.test(provided)) {
-    const sigHex = provided.toLowerCase();
-    return candidates.some(({ hex }) => {
-      const a = Buffer.from(hex, 'utf8');
-      const b = Buffer.from(sigHex, 'utf8');
-      return a.length === b.length && crypto.timingSafeEqual(a, b);
-    });
+    return safeEqual(digestHex.toLowerCase(), provided.toLowerCase());
   }
 
-  // Otherwise treat as base64
+  // If header was base64 (rare), compare as base64 too
   try {
-    const sig = Buffer.from(provided, 'base64');
-    return candidates.some(({ bin }) => sig.length === bin.length && crypto.timingSafeEqual(sig, bin));
+    const digestB64 = Buffer.from(digestHex, 'hex').toString('base64');
+    const providedBuf = Buffer.from(provided, 'base64');
+    const digestBuf = Buffer.from(digestB64, 'base64');
+    return safeEqual(providedBuf, digestBuf);
   } catch {
     return false;
   }
 }
 
-/** Decrypt if "encrypt" is present.
- * AES-256-CBC, PKCS#7; key = SHA256(ENCRYPT_KEY); payload = base64( IV(16) || CIPHERTEXT )
+/**
+ * Verify v2 HMAC signature (App Secret):
+ *   Prefer: HMAC-SHA256(timestamp + nonce + encrypt)  if "encrypt" exists
+ *   Fallback: HMAC-SHA256(timestamp + nonce + rawBody)
+ * Compare with X-Lark-Signature (hex or base64, may be "v2=..." or "sha256=...")
+ */
+function verifyHmacV2Signature({ timestamp, nonce, signature, rawBody, appSecret }) {
+  if (!timestamp || !nonce || !signature || !appSecret) return false;
+
+  let provided = String(signature).trim();
+  const eq = provided.indexOf('=');
+  if (eq > 0) provided = provided.slice(eq + 1).trim();
+
+  // Try to extract encrypt field (without decoding)
+  let encryptField;
+  try {
+    const maybe = JSON.parse(rawBody);
+    if (maybe && typeof maybe.encrypt === 'string') encryptField = maybe.encrypt;
+  } catch {}
+
+  const make = (str) => crypto.createHmac('sha256', appSecret).update(str).digest();
+
+  const candidates = [];
+  if (encryptField) candidates.push(make(`${timestamp}${nonce}${encryptField}`));
+  candidates.push(make(`${timestamp}${nonce}${rawBody}`));
+
+  // Compare either as hex or base64
+  if (/^[0-9a-f]{64}$/i.test(provided)) {
+    const target = Buffer.from(provided.toLowerCase(), 'utf8');
+    return candidates.some((c) => {
+      const hex = Buffer.from(c.toString('hex'), 'utf8');
+      return hex.length === target.length && crypto.timingSafeEqual(hex, target);
+    });
+  }
+  try {
+    const sig = Buffer.from(provided, 'base64');
+    return candidates.some((c) => sig.length === c.length && crypto.timingSafeEqual(sig, c));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decrypt event if "encrypt" is present.
+ * AES-256-CBC (PKCS#7), key = SHA256(ENCRYPT_KEY), payload = base64( IV(16) || CIPHERTEXT )
  */
 function decryptIfNeeded(rawBodyString) {
   const parsed = JSON.parse(rawBodyString);
@@ -122,7 +123,7 @@ function decryptIfNeeded(rawBodyString) {
 
   const aesKey = crypto.createHash('sha256').update(key, 'utf8').digest(); // 32 bytes
   const encBuf = Buffer.from(parsed.encrypt, 'base64');
-  if (encBuf.length < 17) throw new Error('Invalid encrypt payload (too short).');
+  if (encBuf.length < 17) throw new Error('Invalid encrypt payload');
 
   const iv = encBuf.subarray(0, 16);
   const cipherText = encBuf.subarray(16);
@@ -140,121 +141,103 @@ export default async function handler(req, res) {
 
   const rawBody = await readRawBody(req);
 
-  // Feishu/Lark headers (Global "x-lark-*" or CN "x-feishu-*")
+  // Lark/Feishu headers (Global or CN)
   const hSig = req.headers['x-lark-signature'] || req.headers['x-feishu-signature'];
   const hTs  = req.headers['x-lark-request-timestamp'] || req.headers['x-feishu-request-timestamp'];
   const hN   = req.headers['x-lark-request-nonce'] || req.headers['x-feishu-request-nonce'];
 
-  if (process.env.DEBUG_LOG_BODY === '1') {
-    try {
-      console.info('[incoming][pre-verify]', {
-        headers: { hasSig: !!hSig, ts: String(hTs || ''), nonce: String(hN || ''), sigLen: String(hSig || '').length },
-        rawBodyLength: rawBody.length,
-        hasEncryptField: /"encrypt"\s*:/.test(rawBody),
-        rawBodyHead: rawBody.slice(0, 160),
-      });
-    } catch {}
-  }
+  // --- Security verification
+  const hasEncryptKey = !!process.env.ENCRYPT_KEY;
+  const hasAppSecret  = !!process.env.APP_SECRET;
 
-  // Verify signature when header provided
-  if (hSig) {
-    const ok = verifyV2Signature({
+  let verified = false;
+
+  // 1) Try Encrypt Key signature (required if encryption strategy is configured)
+  if (hasEncryptKey) {
+    verified = verifyEncryptKeySignature({
       timestamp: String(hTs || ''),
       nonce: String(hN || ''),
       signature: String(hSig || ''),
-      body: rawBody,
-      appSecret: process.env.APP_SECRET,
+      rawBody,
+      encryptKey: process.env.ENCRYPT_KEY,
     });
-    if (!ok) {
-      console.warn('[auth] signature verification failed');
-      return res.status(401).json({ error: 'invalid signature' });
-    }
   }
 
-  // Parse (and decrypt if needed) AFTER signature verification
+  // 2) If not verified yet, try HMAC v2 with APP_SECRET
+  if (!verified && hasAppSecret) {
+    verified = verifyHmacV2Signature({
+      timestamp: String(hTs || ''),
+      nonce: String(hN || ''),
+      signature: String(hSig || ''),
+      rawBody,
+      appSecret: process.env.APP_SECRET,
+    });
+  }
+
+  if (!verified) {
+    return res.status(401).json({ error: 'invalid signature' });
+  }
+
+  // --- Parse/decrypt AFTER signature verification
   let body;
   try {
     body = decryptIfNeeded(rawBody);
   } catch (e) {
-    console.error('[decrypt] failed:', e?.message);
-    return res.status(400).json({ error: 'bad payload/decrypt failed' });
+    return res.status(400).json({ error: 'decrypt_failed', detail: e?.message || String(e) });
   }
 
-  if (process.env.DEBUG_LOG_BODY === '1') {
-    try {
-      const topKeys = body && typeof body === 'object' ? Object.keys(body) : [];
-      const headerKeys = body?.header && typeof body.header === 'object' ? Object.keys(body.header) : [];
-      const eventKeys = body?.event && typeof body.event === 'object' ? Object.keys(body.event) : [];
-      console.info('[incoming] structure', {
-        hasEncryptField: /"encrypt"\s*:/.test(rawBody),
-        rawBodyLength: rawBody.length,
-        schema: body?.schema,
-        type: body?.type,
-        headerKeys,
-        eventKeys,
-        topKeys,
-      });
-    } catch {}
-  }
-
-  // URL verification handshake
+  // --- URL Verification
   if (body.type === 'url_verification') {
     return res.status(200).json({ challenge: body.challenge });
   }
 
-  // Optional legacy verification token check
+  // --- Optional Verification Token check
   const expectedToken = process.env.VERIFICATION_TOKEN;
   if (expectedToken) {
     const tokenInBody = body?.header?.token || body?.token;
     if (tokenInBody !== expectedToken) {
-      console.warn('[auth] verification token mismatch');
-      return res.status(401).json({ error: 'invalid verification token' });
+      return res.status(401).json({ error: 'invalid_verification_token' });
     }
   }
 
-  // Handle events
-  const event = body.event;
+  // --- Minimal event handling
+  const event = body?.event;
   if (event?.type === 'im.message.receive_v1') {
     const { chat_id, content, message_type, chat_type, message_id } = event.message;
 
-    let responseText = '';
+    let text = '';
     try {
-      responseText = message_type === 'text'
+      text = message_type === 'text'
         ? JSON.parse(content).text
-        : '解析消息失败，请发送文本消息 \nparse message failed, please send text message';
+        : 'Please send a text message.';
     } catch {
-      responseText = '解析消息失败，请发送文本消息 \nparse message failed, please send text message';
+      text = 'Please send a text message.';
     }
 
     try {
       if (chat_type === 'p2p') {
-        // p2p: use chat_id + receive_id_type=chat_id
         await client.im.v1.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {
             receive_id: chat_id,
-            content: JSON.stringify({ text: `收到你发送的消息:${responseText}\nReceived message: ${responseText}` }),
+            content: JSON.stringify({ text: `Echo: ${text}` }),
             msg_type: 'text',
           },
         });
       } else {
-        // group/thread: reply to message_id
         await client.im.v1.message.reply({
           path: { message_id },
           data: {
-            content: JSON.stringify({ text: `收到你发送的消息:${responseText}\nReceived message: ${responseText}` }),
+            content: JSON.stringify({ text: `Echo: ${text}` }),
             msg_type: 'text',
           },
         });
       }
-    } catch (err) {
-      console.error('[lark api] send message failed', {
-        name: err?.name, message: err?.message, code: err?.code, status: err?.status, data: err?.response?.data,
-      });
-      // still ACK
+    } catch {
+      // Ignore send failures; still ACK
     }
   }
 
-  // ACK quickly to avoid retries
+  // --- ACK quickly
   return res.status(200).json({ ok: true });
 }
